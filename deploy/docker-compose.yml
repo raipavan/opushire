@@ -23,8 +23,8 @@ services:
       WHATSAPP_PROXY_SECRET: "${WHATSAPP_PROXY_SECRET:-}"
     env_file:
       - .env
-    volumes:
-      - vernika_data:/app/backend/data
+    # volumes:
+    #   - vernika_data:/app/backend/data
 
   whatsapp-proxy:
     build:
