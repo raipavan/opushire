@@ -19,7 +19,7 @@ async def main():
     role = "data_edge"
     voice = settings.gemini_live_voice or settings.gemini_tts_voice or "Leda"
     greeting_text = (
-        "Hi, this is Priya from Data Edge. I'm a career counselor — got a quick minute?"
+        "Hi, this is Priya from OpusHire. Is it the right time to speak?"
     )
 
     logger.info(f"Generating greeting PCM for role={role} voice={voice}")

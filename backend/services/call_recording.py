@@ -269,9 +269,12 @@ def recording_search_roots(base_dir: Optional[str | Path] = None) -> list[Path]:
             return
         if key in seen:
             return
-        if p.is_dir():
-            seen.add(key)
-            roots.append(p)
+        try:
+            if p.is_dir():
+                seen.add(key)
+                roots.append(p)
+        except (PermissionError, OSError):
+            pass
 
     if base_dir:
         _add(Path(base_dir))

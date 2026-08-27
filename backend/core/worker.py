@@ -330,11 +330,14 @@ def _read_transcript_jsonl(role: str, log_id: str) -> str:
         # Check the explicitly requested role
         dirs_to_check = [os.path.join(base, role, "logs", day), os.path.join(base, "logs", day)]
         # Also check all other subdirectories in base (which correspond to roles)
-        if os.path.isdir(base):
-            for d in os.listdir(base):
-                sub = os.path.join(base, d, "logs", day)
-                if sub not in dirs_to_check:
-                    dirs_to_check.append(sub)
+        try:
+            if os.path.isdir(base):
+                for d in os.listdir(base):
+                    sub = os.path.join(base, d, "logs", day)
+                    if sub not in dirs_to_check:
+                        dirs_to_check.append(sub)
+        except (PermissionError, OSError):
+            pass
                     
         for sub in dirs_to_check:
             if sub not in candidate_dirs:
