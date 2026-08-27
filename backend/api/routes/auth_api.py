@@ -32,7 +32,7 @@ async def login(request: Request, data: LoginRequest):
         "role": role,
         "dashboard_role": dashboard_role,
         "email": email,
-        "locked": dashboard_role not in {"buyers", "sellers", "rfqs"},
+        "locked": True,
     }
 
 

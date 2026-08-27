@@ -66,7 +66,7 @@ def _resolve_lead_name(lead: Optional[dict]) -> str:
         return ""
     raw = str(lead.get("name") or "").strip()
     if not raw or raw.lower() in (
-        "nan", "none", "null", "n/a", "na", "unknown", "-",
+        "nan", "none", "null", "n/a", "na", "unknown", "-", "test", "demo", "testing",
         "{{name}}", "{name}", "[name]", "[customer name]",
     ):
         return ""

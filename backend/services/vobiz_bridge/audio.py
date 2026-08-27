@@ -111,6 +111,14 @@ def pop_l16_chunk(queue: bytearray, chunk_bytes: int) -> bytes:
     return b"\x00" * chunk_bytes
 
 
+_PLAY_TPL = (
+    '{"event":"playAudio","media":{"contentType":"'
+    + VOBIZ_CONTENT_TYPE
+    + '","sampleRate":16000,"payload":"'
+)
+_PLAY_END = '"}}'
+
+
 async def send_play_audio(
     ws: WebSocket,
     pcm16_bytes: bytes,
@@ -127,12 +135,24 @@ async def send_play_audio(
         chunk = bytes(view[offset : offset + OUT_CHUNK_BYTES])
         if len(chunk) < 2:
             continue
-        msg = {
-            "event": "playAudio",
-            "media": {
-                "contentType": VOBIZ_CONTENT_TYPE,
-                "sampleRate": sr,
-                "payload": base64.b64encode(chunk).decode("ascii"),
-            },
-        }
-        await ws.send_text(json.dumps(msg))
+        await ws.send_text(_PLAY_TPL + base64.b64encode(chunk).decode("ascii") + _PLAY_END)
+
+
+async def send_play_audio_batched(
+    ws: WebSocket,
+    pcm16_bytes: bytes,
+    sr: int = VOBIZ_SR,
+) -> None:
+    """Send PCM audio as a single WebSocket message.
+
+    Unlike ``send_play_audio`` which splits into 640-byte chunks (one WS frame
+    per 20 ms), this sends the entire buffer in one ``playAudio`` message.  On a
+    2-core VPS where each ``ws.send_text()`` blocks for ~280 ms, batching 8
+    frames (160 ms, 5120 bytes) into one send cuts outbound traffic by ~8x and
+    keeps the mixer close to real-time.
+    """
+    if not pcm16_bytes:
+        return
+    await ws.send_text(
+        _PLAY_TPL + base64.b64encode(pcm16_bytes).decode("ascii") + _PLAY_END
+    )

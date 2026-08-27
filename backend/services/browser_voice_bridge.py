@@ -49,7 +49,7 @@ def make_wav_header(data_len: int, sample_rate: int = 16000) -> bytes:
 
 async def handle_browser_voice_ws(websocket: WebSocket) -> None:
     await websocket.accept()
-    query_role = normalize_console_role(websocket.query_params.get("role") or "sellers")
+    query_role = normalize_console_role(websocket.query_params.get("role") or "data_edge")
     role = query_role
     api_key = settings.gemini_api_key
     if not api_key:
@@ -72,20 +72,8 @@ async def handle_browser_voice_ws(websocket: WebSocket) -> None:
         segment = websocket.query_params.get("segment") or "rfq"
         lead = {"segment": segment}
 
-    if role in ("sellers", "buyers", "rfqs") and lead and lead.get("segment"):
-        seg = str(lead.get("segment")).strip().lower()
-        if seg == "seller":
-            role = "sellers"
-        elif seg == "buyer":
-            role = "buyers"
-        elif seg == "rfq":
-            role = "rfqs"
-
     role_config = get_state(role)
     system_prompt = build_role_system_prompt(role, role_config, lead)
-    is_rfq_context = (role == "rfqs" or query_role == "rfqs")
-    if is_rfq_context:
-        system_prompt = system_prompt.replace("Devika", "Radhika").replace("devika", "radhika")
     system_prompt = apply_live_voice_turn_addon(system_prompt)
 
     gemini_url = GEMINI_LIVE_URL_TMPL.format(api_key=api_key)

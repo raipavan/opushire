@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
 from typing import Any, Optional
 
 import httpx
@@ -12,21 +14,8 @@ from xml.sax.saxutils import escape
 
 from .constants import VOBIZ_CONTENT_TYPE, VOBIZ_SR
 
-_vobiz_httpx_client: Optional[httpx.AsyncClient] = None
-
-
-def _get_vobiz_client() -> httpx.AsyncClient:
-    global _vobiz_httpx_client
-    if _vobiz_httpx_client is None:
-        _vobiz_httpx_client = httpx.AsyncClient(timeout=30.0)
-    return _vobiz_httpx_client
-
-
 async def close_vobiz_client() -> None:
-    global _vobiz_httpx_client
-    if _vobiz_httpx_client is not None:
-        await _vobiz_httpx_client.aclose()
-        _vobiz_httpx_client = None
+    """No-op — each call now creates its own client.  Kept for lifespan API compatibility."""
 
 
 def extract_vobiz_start_numbers(start: dict) -> tuple[str, str]:
@@ -119,24 +108,47 @@ async def make_vobiz_call(
     # All documented examples show 'from': "14155551234" (no + prefix).
     # The '+' in the from number can cause carrier routing failures.
     cleaned_from = from_.lstrip("+") if from_ else from_
+    # Vobiz enforces a max call duration via `time_limit` (seconds after answer).
+    # If the Vobiz application/number has a low limit configured, calls are
+    # auto-hung-up ("Scheduled Hangup"). Send a high per-call limit to override
+    # it; the backend still caps calls via its own MAX_CALL_DURATION_SEC watchdog.
+    call_time_limit = int(os.getenv("VOBIZ_CALL_TIME_LIMIT_SEC", "3600"))
     body: dict[str, Any] = {
         "from": cleaned_from,
         "to": to,
         "answer_url": answer_url,
         "answer_method": "POST",
+        "time_limit": call_time_limit,
     }
     if extra:
         body.update(extra)
 
-    client = _get_vobiz_client()
-    logger.info(f"Vobiz Request Body: {body}")
-    r = await client.post(url, json=body, headers=headers)
-    try:
-        data: dict[str, Any] = r.json()
-    except Exception:
-        data = {"raw": r.text}
-    data["_http_status"] = r.status_code
-    logger.info("Vobiz make_call {} -> HTTP {} {}", to, r.status_code, data)
-    if r.status_code >= 400:
-        raise VobizCallError(r.status_code, data)
-    return data
+    max_retries = 3
+    for attempt in range(1, max_retries + 1):
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                r = await client.post(url, json=body, headers=headers)
+        except (httpx.ConnectTimeout, httpx.ConnectError, httpx.ReadTimeout) as exc:
+            last_exc = exc
+            if attempt < max_retries:
+                delay = 1.5 * attempt
+                logger.warning(
+                    "Vobiz API connection attempt {} failed ({}), retrying in {:.1f}s",
+                    attempt, type(exc).__name__, delay,
+                )
+                await asyncio.sleep(delay)
+                continue
+            logger.error(
+                "Vobiz API connection failed after {} attempts: {}",
+                max_retries, exc,
+            )
+            raise
+        try:
+            data: dict[str, Any] = r.json()
+        except Exception:
+            data = {"raw": r.text}
+        data["_http_status"] = r.status_code
+        logger.info("Vobiz make_call {} -> HTTP {} {}", to, r.status_code, data)
+        if r.status_code >= 400:
+            raise VobizCallError(r.status_code, data)
+        return data

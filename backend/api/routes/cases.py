@@ -47,7 +47,7 @@ def _role(request: Request, fallback: Optional[str] = None) -> str:
         request.query_params.get("role")
         or fallback
         or request.headers.get("X-User-Role")
-        or "sellers"
+        or "data_edge"
     )
     return normalize_console_role(raw)
 

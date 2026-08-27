@@ -19,7 +19,7 @@ function apiRoot() {
     return '';
 }
 
-/** Absolute path for API calls, e.g. apiUrl('/api/tuning?role=sellers') */
+/** Absolute path for API calls, e.g. apiUrl('/api/tuning?role=data_edge') */
 function apiUrl(pathWithQuery) {
     const p = pathWithQuery.startsWith('/') ? pathWithQuery : '/' + pathWithQuery;
     const root = apiRoot();
@@ -27,7 +27,7 @@ function apiUrl(pathWithQuery) {
 }
 
 /** Roles tied to the login account — sidebar toggle must not override these. */
-const LOCKED_CONSOLE_ROLES = ['data_edge', 'vernikaai', 'admin'];
+const LOCKED_CONSOLE_ROLES = ['data_edge', 'admin'];
 
 function jwtPayload() {
     try {
@@ -71,7 +71,7 @@ function apiRoleQ() {
     if (window.__VERN_SESSION__ && window.__VERN_SESSION__.can_switch_roles) {
         let role = typeof currentRole !== 'undefined' && currentRole
             ? currentRole
-            : localStorage.getItem('vernika_role') || 'sellers';
+            : localStorage.getItem('vernika_role') || 'data_edge';
         return encodeURIComponent(normalizeRole(role));
     }
     const fromServer = dashboardRole();
@@ -83,7 +83,7 @@ function apiRoleQ() {
     let role =
         typeof currentRole !== 'undefined' && currentRole
             ? currentRole
-            : localStorage.getItem('vernika_role') || 'sellers';
+            : localStorage.getItem('vernika_role') || 'data_edge';
     return encodeURIComponent(normalizeRole(role));
 }
 
@@ -110,7 +110,7 @@ async function bootstrapConsoleSession() {
         try {
             alert(
                 'This site is for the Data Edge counselor console (Priya).\n\n' +
-                    'You are signed in as ' + who + ' (' + (data.dashboard_role || 'sellers') + ' data).\n\n' +
+                    'You are signed in as ' + who + ' (' + (data.dashboard_role || 'data_edge') + ' data).\n\n' +
                     'Please sign out and log in with dataedge@pitchxai.com.'
             );
         } catch (_) {}
@@ -126,19 +126,16 @@ async function bootstrapConsoleSession() {
     localStorage.setItem('vernika_role', dr);
     if (data.email) localStorage.setItem('vernika_email', data.email);
     if (dr === 'data_edge') {
-        ['sellers', 'buyers', 'rfqs'].forEach(function (r) {
-            try {
-                sessionStorage.removeItem('vernika_dash_snap_v2_' + r);
-                sessionStorage.removeItem('vernika_leads_snap_v2_' + r);
-            } catch (_) {}
-        });
+        try {
+            sessionStorage.removeItem('vernika_dash_snap_v2_data_edge');
+            sessionStorage.removeItem('vernika_leads_snap_v2_data_edge');
+        } catch (_) {}
     }
     return data;
 }
 
 function normalizeRole(r) {
-    const valid = ['sellers', 'buyers', 'rfqs', 'data_edge', 'vernikaai', 'admin',
-                   'real_estate', 'factory', 'demo', 'nova_ivf', 'maruti'];
+    const valid = ['data_edge', 'admin', 'factory', 'demo'];
     return valid.includes(r) ? r : 'data_edge';
 }
 

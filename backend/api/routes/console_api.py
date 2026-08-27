@@ -52,7 +52,7 @@ def _role_from_request(request: Request, default: str = "data_edge") -> str:
 from core.phone_norm import norm_phone_str
 from core.greeting_pcm import load_recorded_greeting_pcm
 from core.storage import insert_manual_call, mark_manual_call_failed
-from core.utils import _build_opening_line, _prewarm_opening
+from core.utils import _build_opening_line
 from core.worker import _prime_opening_audio
 from services.call_recording import resolve_session_recording_path
 from services.vobiz_bridge import make_vobiz_call
@@ -510,21 +510,6 @@ async def manual_call(
         role,
     )
     _prime_opening_audio(camp_id, role, opening_text)
-    if not settings.gemini_live_first_opening and opening_text.strip():
-        if not _CAMPAIGN_DATA[camp_id].get("opening_pcm"):
-            try:
-                await asyncio.wait_for(
-                    _prewarm_opening(
-                        camp_id,
-                        opening_text,
-                        settings.gemini_live_voice or settings.gemini_tts_voice,
-                    ),
-                    timeout=5.0,
-                )
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "Manual call: opening audio prewarm timed out — Live will speak first on answer"
-                )
 
     try:
         auth_tail = auth_id[-6:] if auth_id else ""
@@ -547,7 +532,7 @@ async def manual_call(
                 "ring_method": "POST",
                 "hangup_url": f"{v_base}/vobiz/hangup?camp_id={camp_id}",
                 "hangup_method": "POST",
-                "hangup_on_ring": "60",
+                "hangup_on_ring": "3600",
             },
         )
         _call_uuid = _vobiz_resp.get("request_uuid") or ""

@@ -46,11 +46,14 @@ async def lifespan(app: FastAPI):
 
     if not settings.gemini_api_key:
         _diag_errors.append("GEMINI_API_KEY not set — Gemini Live/TTS will fail")
-    elif not settings.gemini_api_key.startswith("AIza"):
+    elif not settings.gemini_api_key.startswith("AIza") and not settings.gemini_api_key.startswith("AQ."):
         _diag_warnings.append(
             f"GEMINI_API_KEY looks unusual (starts with {settings.gemini_api_key[:6]}…) "
             "— ensure it is a valid Google AI Studio key"
         )
+    elif settings.gemini_api_key.startswith("AQ."):
+        logger.info("GEMINI_API_KEY uses Google Auth Key format (AQ.) — standard query parameter auth")
+
 
     if not settings.vobiz_public_base_url:
         _diag_errors.append("VOBIZ_PUBLIC_BASE_URL not set — Vobiz cannot reach this host")
@@ -72,7 +75,7 @@ async def lifespan(app: FastAPI):
     # Check greeting PCM files
     from pathlib import Path
     _greetings_dir = Path(__file__).resolve().parent.parent / "data" / "greetings"
-    for _role_name in ("data_edge", "nova_ivf", "maruti"):
+    for _role_name in ("data_edge",):
         _pcm = _greetings_dir / f"greeting_{_role_name}.pcm"
         _meta = _greetings_dir / f"greeting_{_role_name}.pcm.meta"
         if _pcm.is_file() and _pcm.stat().st_size > 0:

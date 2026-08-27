@@ -253,7 +253,7 @@ async def _process_callback_batch(role: str) -> int:
                     "ring_method": "POST",
                     "hangup_url": f"{v_base}/vobiz/hangup?camp_id={call_id}",
                     "hangup_method": "POST",
-                    "hangup_on_ring": "60",
+                    "hangup_on_ring": "3600",
                 },
             )
             _cb_uuid = _cb_vobiz_resp.get("request_uuid") or ""
@@ -761,21 +761,10 @@ async def _campaign_worker_role(role: str):
                     logger.exception("campaign_live setup skipped: {}", _ce)
 
                 active_role = role
-                if role in ("sellers", "buyers", "rfqs") and lead.get("segment"):
-                    seg = str(lead.get("segment")).strip().lower()
-                    if seg == "seller":
-                        active_role = "sellers"
-                    elif seg == "buyer":
-                        active_role = "buyers"
-                    elif seg == "rfq":
-                        active_role = "rfqs"
-
                 _CAMPAIGN_DATA[call_id]["_role"] = active_role
                 _CAMPAIGN_DATA[call_id]["_campaign_role"] = role
 
                 opening = _build_opening_line(lead, active_role)
-                if role == "rfqs":
-                    opening = opening.replace("Devika", "Radhika").replace("devika", "radhika")
                 _prime_opening_audio(call_id, active_role, opening)
 
                 acquire_vobiz_call_slot(role)
@@ -795,7 +784,7 @@ async def _campaign_worker_role(role: str):
                             "ring_method": "POST",
                             "hangup_url": f"{v_base}/vobiz/hangup?camp_id={call_id}",
                             "hangup_method": "POST",
-                            "hangup_on_ring": "60",
+                            "hangup_on_ring": "3600",
                         },
                     )
                     _call_uuid = _vobiz_resp.get("request_uuid") or ""
@@ -826,6 +815,7 @@ async def _campaign_worker_role(role: str):
                 call_started_at = time.time()
                 MAX_RING_WAIT = 60
                 MAX_TOTAL_WAIT = 360
+                _ws_connected_at = None  # Track when Vobiz WS connects (answer callback received)
 
                 while True:
                     if not _CAMPAIGN_TASKS.get(role):
@@ -834,14 +824,33 @@ async def _campaign_worker_role(role: str):
                     info = _CAMPAIGN_DATA.get(call_id, {})
                     if not answered and info.get("_call_connected_at"):
                         answered = True
-                        logger.info(f"Call connected with {lead_name} ({lead_phone})")
+                        _ws_connected_at = info["_call_connected_at"]
+                        logger.info(
+                            f"Call connected with {lead_name} ({lead_phone}) "
+                            f"[ws_connect_latency={(_ws_connected_at - call_started_at):.1f}s]"
+                        )
                     if answered and info.get("_call_ended_at"):
                         logger.info(f"Call ended naturally with {lead_name}")
                         break
 
                     elapsed = time.time() - call_started_at
+                    # Diagnostic: log progress every 15s while waiting for connection
+                    if not answered and int(elapsed) % 15 == 0 and int(elapsed) > 0:
+                        _prev_log = getattr(_campaign_worker_role, '_last_progress_log', {})
+                        if _prev_log.get(call_id) != int(elapsed):
+                            logger.info(
+                                f"Waiting for answer from {lead_name} ({lead_phone}): "
+                                f"{int(elapsed)}s elapsed, ws_connected={info.get('_call_connected_at') is not None}"
+                            )
+                            _campaign_worker_role._last_progress_log = {call_id: int(elapsed)}
                     if not answered and elapsed >= MAX_RING_WAIT:
-                        logger.warning(f"No answer for {lead_name} ({lead_phone}) after {MAX_RING_WAIT}s — moving on.")
+                        logger.warning(
+                            f"No answer for {lead_name} ({lead_phone}) after {MAX_RING_WAIT}s — "
+                            f"Vobiz answer callback may not have fired. "
+                            f"Check: (1) VOBIZ_PUBLIC_BASE_URL is reachable, "
+                            f"(2) WebSocket upgrade works on your domain, "
+                            f"(3) camp_id={call_id[:12]}... was passed correctly."
+                        )
                         break
                     if elapsed >= MAX_TOTAL_WAIT:
                         logger.warning(f"Call to {lead_name} exceeded {MAX_TOTAL_WAIT}s — forcing next.")

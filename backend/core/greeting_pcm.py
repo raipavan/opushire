@@ -144,13 +144,15 @@ def _write_greeting_cache_files(
 
 
 async def _generate_and_cache_greeting(role: str, text: str, voice: str) -> Optional[Tuple[bytes, int]]:
-    """Cache opening audio — **Gemini Live capture** first (same voice as the call)."""
+    """Cache opening audio — **Gemini Live capture** first (same voice as the call),
+    then **REST TTS** fallback if Live capture fails."""
     text = (text or "").strip()
     if not text:
         return None
 
     live_voice = (settings.gemini_live_voice or "Leda").strip()
 
+    # 1) Try Gemini Live capture (same voice as the call)
     try:
         from services.live_greeting_capture import capture_live_greeting_pcm
 
@@ -159,10 +161,33 @@ async def _generate_and_cache_greeting(role: str, text: str, voice: str) -> Opti
         _write_greeting_cache_files(role, text, pcm, sr, source="gemini_live_capture", voice=live_voice)
         return pcm, sr
     except Exception as live_exc:
-        logger.error(
-            "Live greeting capture failed for role={} — greeting cache not populated: {}",
+        logger.warning(
+            "Live greeting capture failed for role={} — trying REST TTS fallback: {}",
             role,
             live_exc,
+        )
+
+    # 2) Fallback: REST TTS (different voice engine but better than silence)
+    try:
+        from services.gemini_tts import gemini_synthesize_pcm, get_gemini_tts_httpx
+
+        tts_client = await get_gemini_tts_httpx()
+        tts_voice = (settings.gemini_tts_voice or voice or "Leda").strip()
+        logger.info("Generating greeting via REST TTS fallback for role={} voice={}", role, tts_voice)
+        pcm, sr = await gemini_synthesize_pcm(
+            tts_client,
+            text=text,
+            voice=tts_voice,
+            style_mode="opening",
+        )
+        _write_greeting_cache_files(role, text, pcm, sr, source="gemini_tts_rest", voice=tts_voice)
+        logger.info("REST TTS fallback greeting generated for role={} ({} bytes, sr={})", role, len(pcm), sr)
+        return pcm, sr
+    except Exception as tts_exc:
+        logger.error(
+            "REST TTS fallback also failed for role={} — no greeting audio will be available: {}",
+            role,
+            tts_exc,
         )
         return None
 

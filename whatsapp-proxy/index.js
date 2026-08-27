@@ -53,6 +53,7 @@ const client = new Client({
   authStrategy: new LocalAuth({ dataPath: SESSION_PATH }),
   puppeteer: {
     headless: true,
+    executablePath: 'C:\\Users\\Mayur\\AppData\\Local\\ms-playwright\\chromium-1228\\chrome-win64\\chrome.exe',
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
@@ -208,6 +209,44 @@ app.post("/send", async (req, res) => {
   } catch (e) {
     console.error("[whatsapp-proxy] send failed:", e.message);
     return res.status(500).json({ error: e.message });
+  }
+});
+
+// List all groups
+app.get("/groups", async (_req, res) => {
+  if (!state.connected) return res.status(503).json({ error: "Not connected" });
+  try {
+    const chats = await client.getChats();
+    const groups = chats.filter(c => c.isGroup).map(c => ({
+      id: c.id._serialized,
+      name: c.name,
+      participants: c.participants.map(p => ({
+        id: p.id._serialized,
+        phone: p.id.user,
+        name: p.pushname || '',
+        isAdmin: p.isAdmin
+      }))
+    }));
+    res.json(groups);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Get group contacts
+app.get("/group/:id/contacts", async (req, res) => {
+  if (!state.connected) return res.status(503).json({ error: "Not connected" });
+  try {
+    const chat = await client.getChatById(req.params.id);
+    if (!chat.isGroup) return res.status(400).json({ error: "Not a group" });
+    const contacts = chat.participants.map(p => ({
+      phone: p.id.user,
+      name: p.pushname || '',
+      isAdmin: p.isAdmin
+    }));
+    res.json({ group: chat.name, contacts });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
 });
 

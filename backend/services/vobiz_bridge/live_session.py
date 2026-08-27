@@ -30,6 +30,7 @@ from .audio import (
     pop_l16_chunk,
     resample_24k_to_16k_numpy,
     send_play_audio,
+    send_play_audio_batched,
 )
 from .constants import GEMINI_OUT_SR, VOBIZ_SR
 from .gemini_protocol import (
@@ -39,6 +40,7 @@ from .gemini_protocol import (
     gemini_send_live_opening_turn_nudge,
     gemini_send_live_rag,
     gemini_send_pcm_silence_kick,
+    gemini_send_retry_nudge,
     gemini_send_silence_prompt,
 )
 from .turn_taking_addon import apply_live_voice_turn_addon
@@ -243,11 +245,13 @@ async def handle_vobiz_ws_live(
     system_prompt = ""
     voice = settings.gemini_live_voice
     opening_line = settings.vobiz_opening_line_default
-    role = "sellers"
-    log_dir = str(_get_role_path("sellers", "logs"))
+    role = "data_edge"
+    log_dir = str(_get_role_path("data_edge", "logs"))
     recording_dir = settings.call_recording_dir
     api_key = settings.gemini_api_key
     model = settings.gemini_live_model
+    if not model or "3.1" in model or "3-1" in model:
+        model = "models/gemini-2.0-flash-exp"
     language_code = settings.gemini_live_language_code
 
     # ── Latency opt: start Gemini WS connect EARLY ──────────────────────
@@ -285,16 +289,8 @@ async def handle_vobiz_ws_live(
                 logger.warning("Vobiz WS: Failed to recover campaign lead from database: {}", e)
 
     if data:
-        role = data.get("_role", "sellers")
+        role = data.get("_role", "data_edge")
         campaign_role = data.get("_campaign_role", role)
-        if role in ("sellers", "buyers", "rfqs") and data.get("segment"):
-            seg = str(data.get("segment")).strip().lower()
-            if seg == "seller":
-                role = "sellers"
-            elif seg == "buyer":
-                role = "buyers"
-            elif seg == "rfq":
-                role = "rfqs"
         log_dir = str(_get_role_path(role, "logs"))
         
         # Priority: Sandbox Prompt > Role Prompt > Default
@@ -346,10 +342,6 @@ async def handle_vobiz_ws_live(
     camp_row = data
 
     prompt_role = role
-    if role == "rfqs" and isinstance(camp_row, dict):
-        if str(camp_row.get("Segment", "")).strip().lower() == "seller":
-            prompt_role = "sellers"
-            logger.info(f"Dynamic role swap: rfqs -> sellers for segment=seller on call {camp_id}")
 
     if not system_prompt:
         role_config = get_state(prompt_role)
@@ -457,35 +449,6 @@ async def handle_vobiz_ws_live(
             callee_lines.append("Additional context from the lead list (mention these naturally when relevant — do not read out as a list, do not invent fields that are not here):")
             callee_lines.extend(extra_lines)
 
-        if prompt_role == "rfqs":
-            callee_lines.append("")
-            callee_lines.append("[HOW TO USE RFQ CONTEXT — CRITICAL FOR THIS CALL]")
-            callee_lines.append(
-                "You are calling about a specific RFQ (Request for Quotation). Use the context above naturally:"
-            )
-            if co:
-                callee_lines.append(
-                    f"0. Mention the buyer organisation ({co}) once in your opening exchange "
-                    "(e.g. confirming you're reaching someone at that company about their RFQ), "
-                    "even when you also use their personal name — do not skip the organisation."
-                )
-            callee_lines.append(
-                "1. Start by referencing their RFQ: 'I'm calling about the {RFQ Subject} you requested...'"
-            )
-            callee_lines.append("2. Mention the product/specs they're interested in from the context")
-            callee_lines.append(
-                "3. If quantity is mentioned, acknowledge it: 'I see you're looking for {Quantity}...'"
-            )
-            callee_lines.append(
-                "4. If there's a previous quote or last_quote value, reference it: "
-                "'I can offer you a better price than the {Last Quote} you saw...'"
-            )
-            callee_lines.append(
-                "5. NEVER ask them to repeat details you already have from the context above"
-            )
-            callee_lines.append(
-                "6. Use the context to sound informed and prepared — this builds trust"
-            )
 
         detail_block = "\n".join(callee_lines) + "\n"
     # Per-role persona anchors + pacing/context rules (cached for performance).
@@ -527,22 +490,11 @@ async def handle_vobiz_ws_live(
 
     inbound_block = ""
     if inbound_role:
-        r_in = normalize_console_role(inbound_role)
-        if r_in == "maruti":
-            inbound_block = (
-                "\n[OUTBOUND PMS REMINDER CALL — UDAY AUTOLINK MARUTI SUZUKI SERVICE]\n"
-                "You are **Aarohi** calling the customer on behalf of Uday Autolink Maruti Suzuki Service, Kathwada.\n"
-                "This is an OUTBOUND call — you called THEM to check on their vehicle experience and invite them for a service visit.\n"
-                "Start in **Gujarati**. Mirror whatever language the customer uses immediately.\n"
-                "Follow the outbound conversation flow: Greeting → Car Experience Check → Smooth Running Invitation → Appointment Booking → Close.\n"
-                "Keep it warm, friendly, and concise — max 2 sentences per turn. No hard sell.\n\n"
-            )
-        else:
-            inbound_block = (
-                "\n[INBOUND CALL — CUSTOMER DIALED US]\n"
-                "This is an INCOMING call — the customer reached our number. "
-                "Use your inbound service-desk greeting and help with their enquiry.\n\n"
-            )
+        inbound_block = (
+            "\n[INBOUND CALL — CUSTOMER DIALED US]\n"
+            "This is an INCOMING call — the customer reached our number. "
+            "Use your inbound service-desk greeting and help with their enquiry.\n\n"
+        )
 
     if static_blocks.startswith("[ANCHOR"):
         system_prompt = static_blocks + inbound_block + case_block + system_prompt + detail_block
@@ -633,12 +585,6 @@ async def handle_vobiz_ws_live(
         call_role = prompt_role
         role_config = get_state(call_role)
         rag = (role_config.get("rag") or "").strip()
-        if call_role == "sellers":
-            from prompts.priya import get_role_rag_source_text
-
-            file_rag = get_role_rag_source_text("sellers")
-            if file_rag:
-                rag = file_rag
         if not rag:
             return None
         query_lower = (q or "").lower()
@@ -666,6 +612,9 @@ async def handle_vobiz_ws_live(
     # anything meaningful for SILENCE_HANGUP_SEC, the silence_watchdog task hangs
     # up the call so the campaign worker can move to the next lead.
     last_meaningful_t: float = time.perf_counter()
+    # Set True when the first user STT text arrives after the greeting phase.
+    # Used by greeting_silence_watchdog to decide whether a nudge is needed.
+    greeting_stt_seen: bool = False
     SILENCE_HANGUP_SEC: float = float(os.getenv("CALL_SILENCE_HANGUP_SEC", "30"))
     MAX_CALL_DURATION_SEC: float = float(os.getenv("CALL_MAX_DURATION_SEC", "600"))
     # Grace period: do NOT trigger silence watchdog during the first N seconds
@@ -736,12 +685,7 @@ async def handle_vobiz_ws_live(
     if greeting_text:
         opening_line = greeting_text
 
-    is_rfq_context = (
-        role == "rfqs" or 
-        campaign_role == "rfqs" or 
-        (manual_role and normalize_console_role(manual_role) == "rfqs") or 
-        (inbound_role and normalize_console_role(inbound_role) == "rfqs")
-    )
+    is_rfq_context = False
     if is_rfq_context:
         if opening_line:
             opening_line = opening_line.replace("Devika", "Radhika").replace("devika", "radhika")
@@ -803,10 +747,9 @@ async def handle_vobiz_ws_live(
             system_prompt += (
                 f"\n\n[RECORDED GREETING ALREADY PLAYED — DO NOT REPEAT]\n"
                 f"The callee already heard this exact opening on recorded audio:\n\"{played_line}\"\n"
-                "Do NOT repeat, paraphrase, or re-deliver that greeting or your introduction.\n"
-                "Do NOT run STAGE 1–3 opener scripts again — those lines were already spoken.\n"
-                "Wait for the customer to speak first. If they stay silent ~3 seconds, ONE short "
-                "follow-up only (e.g. ask how you can help with service) — never the opening line again.\n"
+                "Do NOT repeat the greeting or your introduction.\n"
+                "Now immediately continue with a brief follow-up question (e.g. ask how you can help, "
+                "or check if they have a moment). Keep it short and natural — never the opening line again.\n"
             )
         else:
             system_prompt += (
@@ -825,51 +768,11 @@ async def handle_vobiz_ws_live(
         )
     elif gemini_live_first:
         _live_first_hints = {
-            "buyers": (
-                "[OPENING — YOUR FIRST SPOKEN UTTERANCE ON THIS CALL]\n"
-                "You begin the conversation now with one short warm greeting as **Adithi** "
-                "from Procucev Enterprise Solutions — procurement specialist reaching out "
-                "about procurement needs — then continue per your persona.\n"
-            ),
-            "sellers": (
-                "[OPENING — YOUR FIRST SPOKEN UTTERANCE ON THIS CALL]\n"
-                "You begin the conversation now with one short warm greeting as **Devika** "
-                "from Procucev about GMT (Get My Quote) for sellers — then continue per your persona.\n"
-            ),
-            "rfqs": (
-                "[OPENING — YOUR FIRST SPOKEN UTTERANCE ON THIS CALL]\n"
-                "You begin the conversation now with one short warm greeting as **Devika** "
-                "from Procucev, Bangalore (GMT / priority vendor RFQ pitch for sellers) — then continue per your persona.\n"
-            ),
             "data_edge": (
                 "[OPENING — YOUR FIRST SPOKEN UTTERANCE ON THIS CALL]\n"
                 "You begin as **Priya**, career counselor at **Data Edge** (say exactly): "
                 "\"Hi, this is Priya from Data Edge. I'm a career counselor — got a quick minute?\" "
                 "— then continue per your persona. Never mention Tirupati or real estate.\n"
-            ),
-            "maruti": (
-                "[OPENING — YOUR FIRST SPOKEN UTTERANCE ON THIS CALL]\n"
-                "You are **Priya** calling the customer from Uday Autolink Maruti Suzuki Service, Kathwada. "
-                "Your EXACT first words must be (say this faithfully in Gujarati): "
-                "\"હું Priya બોલું છું Uday Autolink માંથી, આજે આપ કેમ છો?\" "
-                "— then continue per your outbound persona.\n"
-            ),
-            "real_estate": (
-                "[OPENING — YOUR FIRST SPOKEN UTTERANCE ON THIS CALL]\n"
-                "You begin the conversation now with one short warm greeting as **Priya** from Technopolis "
-                "(say exactly): \"Hi this is Priya, How are you doing today?\" — then continue per your persona.\n"
-            ),
-            "nova_ivf": (
-                "[OPENING — YOUR FIRST SPOKEN UTTERANCE ON THIS CALL]\n"
-                "You begin the conversation now with one short warm, empathetic greeting as **Priya** "
-                "from Nova IVF Fertility (say exactly): "
-                "\"Hi, thank you for calling Nova IVF, how can I help you?\" "
-                "— then listen and continue per your persona.\n"
-            ),
-            "vernikaai": (
-                "[OPENING — YOUR FIRST SPOKEN UTTERANCE ON THIS CALL]\n"
-                "You begin the conversation now with one short warm greeting as **Priya** "
-                "from Dariaan (Meta ad fashion enquiry) — then continue per your persona.\n"
             ),
         }
         hint = _live_first_hints.get(role)
@@ -940,17 +843,22 @@ async def handle_vobiz_ws_live(
 
         async def scripted_sender() -> None:
             try:
-                # Wait until Vobiz stream is ready (start event received)
-                # but with a timeout so we don't block greeting forever.
-                try:
-                    await asyncio.wait_for(vobiz_stream_started.wait(), timeout=3.0)
-                except asyncio.TimeoutError:
-                    logger.warning("scripted_sender: vobiz_stream_started timeout — sending greeting anyway")
+                # Wait until Vobiz stream is ready (start event received).
+                # Vobiz can take 5-10s to emit the start event; waiting avoids
+                # sending audio into a closed pipe which causes TCP backpressure.
+                await vobiz_stream_started.wait()
+                logger.info("scripted_sender: vobiz_stream_started received — beginning greeting playback")
                 chunk_samples = int(VOBIZ_SR * 0.02)
                 chunk_bytes = chunk_samples * 2
-                # Burst 800ms instantly to fill Vobiz's native jitter buffer!
-                next_wakeup = time.perf_counter() - 0.80
                 scripted_bg_pos = 0
+                _outbuf = bytearray()
+                # Build the ENTIRE greeting in one tight (non-yielding) loop. This
+                # must not contain any `await`/sleep: under event-loop starvation
+                # (heavy API polling / campaign worker on the single shared loop of
+                # a 2-core VPS) a per-chunk `await asyncio.sleep` was being delayed
+                # ~300ms each, stretching 2.2s of audio to ~34s. A non-yielding
+                # mix loop finishes in <10ms; Vobiz then plays the buffered audio
+                # at its own real-time rate.
                 while len(buf) > 0:
                     if abort_scripted.is_set():
                         return
@@ -962,20 +870,32 @@ async def handle_vobiz_ws_live(
                         scripted_bg_pos,
                         chunk_samples,
                     )
+                    _outbuf.extend(mixed)
+                if call_rec is not None:
+                    call_rec.add_outbound(bytes(_outbuf))
+                # Send the whole greeting in a few rapid (unpaced) batched chunks.
+                # Vobiz buffers streamed audio and plays it back at real-time, so
+                # dumping ~2.2s at once yields correct-speed playback.
+                _t0 = time.perf_counter()
+                for _off in range(0, len(_outbuf), 16384):
                     try:
-                        await send_play_audio(
-                            ws, mixed, VOBIZ_SR, call_recorder=call_rec
+                        await send_play_audio_batched(
+                            ws, bytes(_outbuf[_off : _off + 16384]), VOBIZ_SR
                         )
                     except Exception as e:
                         logger.warning("scripted opening send_play_audio failed: {}", e)
-                    next_wakeup += 0.02
-                    sleep_time = next_wakeup - time.perf_counter()
-                    if sleep_time > 0:
-                        await asyncio.sleep(sleep_time)
-                    else:
-                        # Reset timing grid on any delay to prevent cumulative drift
-                        # which causes buffer underflow and audio stuttering
-                        next_wakeup = time.perf_counter()
+                logger.info(
+                    "DIAG scripted greeting delivered: bytes={} send_ms={:.0f}",
+                    len(_outbuf), (time.perf_counter() - _t0) * 1000,
+                )
+                # The greeting is already delivered to Vobiz in one shot; Vobiz
+                # queues/buffers and plays it at real-time regardless of our loop.
+                # Don't park the greeting phase for the full playback duration —
+                # under event-loop starvation that sleep stretches to seconds and
+                # leaves dead air before Gemini connects. A short settle is enough;
+                # Gemini's audio is appended AFTER the greeting in Vobiz's queue, so
+                # there is no overlap.
+                await asyncio.sleep(0.35)
             finally:
                 opening_done.set()
 
@@ -1100,6 +1020,38 @@ async def handle_vobiz_ws_live(
         )
         return True
 
+    # ── Latency opt: finalize system prompt early (before greeting) ──
+    # The WS handshake (TCP+TLS+WS) was kicked off at line ~260 and overlaps
+    # all DB/config work. Here we just prepare the setup payload so it can be
+    # sent instantly after the greeting finishes.
+    if is_rfq_context:
+        system_prompt = system_prompt.replace("Devika", "Radhika").replace("devika", "radhika")
+    system_prompt = apply_live_voice_turn_addon(system_prompt)
+    if defer_gemini_until_scripted and opening_line:
+        system_prompt += (
+            f"\n\n[SYSTEM DIRECTION: The outbound call has just connected. The system has already played "
+            f"the following greeting to the callee: \"{opening_line}\". Do NOT repeat this greeting. "
+            f"Wait for the callee to respond and continue the conversation naturally from there.]"
+        )
+    vad_ultra = bool(int(os.getenv("GEMINI_LIVE_VAD_ULTRA", "1"))) and role == "data_edge" and _prior_opening_bytes_at_connect == 0
+    logger.info(
+        "DIAG VAD config: role={} ultra={} aggressive={} start_sens={} end_sens={} silence_ms={} prefix_ms={}",
+        role,
+        vad_ultra,
+        settings.gemini_live_aggressive_activity_detection,
+        os.getenv("GEMINI_LIVE_VAD_START_SENSITIVITY", "default"),
+        os.getenv("GEMINI_LIVE_VAD_END_SENSITIVITY", "default"),
+        settings.gemini_live_vad_silence_duration_ms,
+        settings.gemini_live_vad_prefix_padding_ms,
+    )
+    setup = build_live_setup(
+        model=model,
+        system_instruction=system_prompt,
+        voice=voice,
+        language_code=language_code,
+        vad_ultra=vad_ultra,
+    )
+
     try:
         if defer_gemini_until_scripted:
             if not await drain_scripted_opening_before_live_connect(opening_script_pcm):
@@ -1107,16 +1059,75 @@ async def handle_vobiz_ws_live(
             # Greeting phase is over — record the timestamp so user audio suppression
             # persists for a short grace period (prevents VAD deadlock).
             greeting_phase_end_t = time.perf_counter()
-            logger.info("Greeting phase ended — user audio forwarding will resume after {:.1f}s grace", GREETING_PHASE_GRACE_SEC)
+            # CRITICAL FIX: Reset the silence timer AFTER the greeting finishes.
+            # Without this, the silence watchdog counts from WebSocket connect time,
+            # which includes the greeting playback duration — causing premature hangup
+            # at ~40s when the greeting takes ~5-10s and Gemini takes ~25s to respond.
+            last_meaningful_t = time.perf_counter()
+            logger.info(
+                "DIAG greeting phase: ended at +{:.0f}ms — user audio forwarded immediately (grace={:.1f}s) "
+                "silence_timer_reset=True",
+                (greeting_phase_end_t - _opening_t0) * 1000,
+                GREETING_PHASE_GRACE_SEC,
+            )
         else:
             # No scripted greeting — greeting phase ends immediately
             greeting_phase_end_t = time.perf_counter()
-            logger.info("No scripted greeting — greeting phase ended immediately")
+            # Reset silence timer for non-scripted path too
+            last_meaningful_t = time.perf_counter()
+            logger.info(
+                "DIAG greeting phase: no scripted greeting — ended at +{:.0f}ms silence_timer_reset=True",
+                (greeting_phase_end_t - _opening_t0) * 1000,
+            )
 
-        # ── Latency opt: await the early-started Gemini WS connect ──────
+        # ── Await the early-started Gemini WS connect (handshake only) ──────
         # The connect was kicked off right after api_key resolution so the
         # TCP+TLS+WS handshake overlaps with all the DB/config work above.
-        _gem = await _gemini_ws_connect_task
+        # We do NOT send setup here — that happens inside the async context
+        # below where pump_gemini_to_queue is already running to catch setupComplete.
+        try:
+            _gem = await _gemini_ws_connect_task
+        except Exception as _conn_exc:
+            logger.error(
+                "DIAG: Gemini Live WS connection FAILED ({}): {} — "
+                "call will rely on TTS fallback or scripted greeting. "
+                "Check: API key validity, network connectivity to generativelanguage.googleapis.com, "
+                "model '{}' availability.",
+                type(_conn_exc).__name__, _conn_exc, model,
+            )
+            # Try to play TTS greeting as fallback so the call isn't completely silent
+            if opening_line and len(prior_16k_queue) == 0:
+                try:
+                    from services.gemini_tts import gemini_synthesize_pcm, get_gemini_tts_httpx
+                    tts_client = await get_gemini_tts_httpx()
+                    pcm_bytes, sr = await asyncio.wait_for(
+                        gemini_synthesize_pcm(
+                            tts_client,
+                            text=opening_line,
+                            voice=voice,
+                            style_mode="opening",
+                        ),
+                        timeout=15.0,
+                    )
+                    if pcm_bytes and len(pcm_bytes) > 100:
+                        if sr != VOBIZ_SR:
+                            pcm_bytes = pcm_resample(pcm_bytes, sr, VOBIZ_SR)
+                        await send_play_audio_batched(ws, pcm_bytes, VOBIZ_SR)
+                        if call_rec is not None:
+                            call_rec.add_outbound(pcm_bytes)
+                        last_meaningful_t = time.perf_counter()
+                        append_turn(
+                            live_log_id, "assistant", opening_line,
+                            "vobiz-live", base_dir=log_dir,
+                            note="ws_connect_fail_tts_greeting",
+                        )
+                        logger.info(
+                            "WS_CONNECT_FALLBACK: TTS greeting delivered after Gemini WS failure ({} bytes)",
+                            len(pcm_bytes),
+                        )
+                except Exception as _tts_fallback_exc:
+                    logger.warning("WS_CONNECT_FALLBACK: TTS greeting also failed: {}", _tts_fallback_exc)
+            return
         _gemini_ws_connect_task = None  # mark consumed
         _gem_live_session_t0 = time.perf_counter()
         _ws_connect_ms = (_gem_live_session_t0 - _opening_t0) * 1000
@@ -1136,53 +1147,6 @@ async def handle_vobiz_ws_live(
                 except Exception: pass
 
         async with _ReuseGeminiWS() as gem:
-            if is_rfq_context:
-                system_prompt = system_prompt.replace("Devika", "Radhika").replace("devika", "radhika")
-            system_prompt = apply_live_voice_turn_addon(system_prompt)
-            if defer_gemini_until_scripted and opening_line:
-                system_prompt += (
-                    f"\n\n[SYSTEM DIRECTION: The outbound call has just connected. The system has already played "
-                    f"the following greeting to the callee: \"{opening_line}\". Do NOT repeat this greeting. "
-                    f"Wait for the callee to respond and continue the conversation naturally from there.]"
-                )
-            vad_ultra = role == "data_edge" and _prior_opening_bytes_at_connect == 0
-            setup = build_live_setup(
-                model=model,
-                system_instruction=system_prompt,
-                voice=voice,
-                language_code=language_code,
-                vad_ultra=vad_ultra,
-            )
-            await gem.send(json.dumps(setup))
-            _setup_ms = (time.perf_counter() - _opening_t0) * 1000
-            logger.info("Gemini Live: setup sent (model={}, voice={}, lang={}) [OPENING_TIMING | setup_sent | +{:.0f}ms]", model, voice, language_code, _setup_ms)
-            logger.info(
-                "DIAG: Gemini Live setup sent — model={} voice={} system_prompt_len={} chars",
-                model,
-                voice,
-                len(system_prompt),
-            )
-
-            # No blocking recv(): ``pump_gemini_to_queue`` consumes ``setupComplete`` on the same
-            # socket immediately — an extra recv here added up to 500 ms before the PCM kick.
-
-            # Silence kicks: deferred-connect legs already had Vobiz ``start`` during scripted PCM,
-            # so only send the single stream-start-style kick here (matches prior behavior when a
-            # scripted queue hid early kicks).
-            # Latency opt: run the silence kick as a background task so it doesn't block
-            # the setup of pump_vobiz_to_gemini / pump_gemini_to_queue / pump_mixed_to_vobiz.
-            async def _send_silence_kick_bg() -> None:
-                if state.gemini_silence_kick_sent:
-                    return
-                try:
-                    dur = 120 if defer_gemini_until_scripted else 200
-                    await gemini_send_pcm_silence_kick(gem, duration_ms=dur)
-                    state.gemini_silence_kick_sent = True
-                except Exception as e:
-                    logger.warning("Gemini Live: silence kick failed: {}", e)
-            _sk_task = asyncio.create_task(_send_silence_kick_bg())
-            _background_tasks.add(_sk_task)
-            _sk_task.add_done_callback(_background_tasks.discard)
 
             rec_extra: dict[str, Any] = {}
             if call_rec is not None:
@@ -1203,6 +1167,12 @@ async def handle_vobiz_ws_live(
             had_model_audio_turn = False
             last_rag_inject_key = ""
             activity_end_seq = 0
+            # Set once Gemini acknowledges ``setup``; gates all outbound traffic
+            # (user audio, nudges, silence kick) so we never send before config.
+            gemini_setup_complete = asyncio.Event()
+            # Guard: prevents double TTS greeting when both _fallback_greeting_tts
+            # and _setup_complete_watchdog try to deliver the greeting.
+            fallback_tts_played = False
 
             # While prior_16k_queue still holds opening audio, we drop Gemini model
             # audio so the first words on the line always match the scripted line.
@@ -1213,6 +1183,8 @@ async def handle_vobiz_ws_live(
             async def pump_vobiz_to_gemini() -> None:
                 nonlocal last_user_audio_t, vobiz_meta_logged, inbound_callback_recorded, vobiz_stream_started_at
                 connect_t0 = time.perf_counter()
+                user_audio_fwd_bytes = 0
+                user_audio_fwd_logged = False
                 while True:
                     raw = await _vobiz_incoming.get()
                     if raw is None:
@@ -1278,7 +1250,8 @@ async def handle_vobiz_ws_live(
                         
                         # One silence burst to Gemini so Live activates VAD / turn-taking.
                         # Deduped with the pre-start kick when ``prior_16k_queue`` is empty.
-                        if not state.gemini_silence_kick_sent:
+                        # Gate on setupComplete (don't send audio before the session is configured).
+                        if not state.gemini_silence_kick_sent and gemini_setup_complete.is_set():
                             logger.info("Vobiz stream started: Gemini PCM silence kick (VAD)")
                             try:
                                 await gemini_send_pcm_silence_kick(gem, duration_ms=120)
@@ -1291,20 +1264,19 @@ async def handle_vobiz_ws_live(
                         if not b64:
                             continue
                         # Vobiz sends 16 kHz L16 PCM; Gemini wants exactly that.
-                        latency.on_audio_received()
+                        _in_pcm = None
                         try:
-                            if call_rec is not None:
-                                _in_pcm = base64.b64decode(b64)
-                                if _in_pcm:
-                                    call_rec.add_inbound(_in_pcm)
+                            _in_pcm = base64.b64decode(b64)
+                            if _in_pcm and call_rec is not None:
+                                call_rec.add_inbound(_in_pcm)
                         except Exception:
                             logger.debug("Base64 decode or recording failed in pump_vobiz_to_gemini")
                         last_user_audio_t = time.perf_counter()
 
-                        # During greeting phase: suppress ALL user audio to prevent VAD
-                        # deadlock (user says "Hello?" during greeting delay → VAD keeps waiting).
-                        # Also skip when scripted PCM is still queued for the handset.
-                        if _in_greeting_phase() or len(prior_16k_queue) > 0:
+                        # Forward user audio even during the greeting phase grace period so Gemini
+                        # can hear the user responding to the greeting immediately. Only skip while
+                        # scripted PCM is still physically queued for the handset (prior_16k_queue).
+                        if len(prior_16k_queue) > 0:
                             continue
 
                         mute_s = max(0.0, settings.vobiz_gemini_live_forward_mute_seconds)
@@ -1317,6 +1289,34 @@ async def handle_vobiz_ws_live(
 
                         latency.on_gemini_forwarded()
                         # Forward base64 directly to Gemini — avoids decode+re-encode overhead (~5ms/frame).
+                        # Gate on setupComplete so we never send audio before the session is configured.
+                        if not gemini_setup_complete.is_set():
+                            if user_audio_fwd_bytes == 0:
+                                _elapsed_ms = (time.perf_counter() - _opening_t0) * 1000
+                                if _elapsed_ms > 5000:
+                                    logger.warning(
+                                        "DIAG user-audio: BLOCKED for {:.0f}ms — setupComplete not received. "
+                                        "Gemini session may be hung (model={}, camp={}). "
+                                        "User audio will NOT reach Gemini until setup completes.",
+                                        _elapsed_ms, model, camp_id,
+                                    )
+                            continue
+                        in_len = len(_in_pcm) if _in_pcm else len(b64)
+                        user_audio_fwd_bytes += in_len
+                        if not user_audio_fwd_logged:
+                            user_audio_fwd_logged = True
+                            logger.info(
+                                "DIAG user-audio: FIRST frame forwarded to Gemini at +{:.0f}ms (role={}, greeting_phase={})",
+                                (time.perf_counter() - _opening_t0) * 1000,
+                                role,
+                                _in_greeting_phase(),
+                            )
+                        if user_audio_fwd_bytes % 16000 < in_len:
+                            logger.info(
+                                "DIAG user-audio: forwarded {} bytes (~{:.1f}s) to Gemini so far",
+                                user_audio_fwd_bytes,
+                                user_audio_fwd_bytes / 32000.0,
+                            )
                         await gem.send(json.dumps({
                             "realtimeInput": {
                                 "audio": {
@@ -1397,13 +1397,37 @@ async def handle_vobiz_ws_live(
                     last_rag_inject_key = ""
 
             async def pump_gemini_to_queue() -> None:
-                nonlocal response_t0, last_in_user, last_out_assistant, had_model_audio_turn, last_rag_inject_key, activity_end_seq, last_meaningful_t, gemini_resample_state, model_generation_active
+                nonlocal response_t0, last_in_user, last_out_assistant, had_model_audio_turn, last_rag_inject_key, activity_end_seq, last_meaningful_t, gemini_resample_state, model_generation_active, greeting_stt_seen
                 first_byte_logged = False
+                turn_model_bytes = 0
+                _retry_nudge_count = 0
+                _MIN_MODEL_AUDIO_BYTES = 500
+                # Send the live ``setup`` as the very first message, before any
+                # realtimeInput/audio. Without it Gemini rejects the session with
+                # close code 1007 ("invalid argument"). pump_vobiz_to_gemini and the
+                # opening nudges must wait for ``setupComplete`` before sending anything.
+                try:
+                    await gem.send(json.dumps(setup))
+                    logger.info(
+                        "Gemini Live: setup sent (model={} voice={} lang={})",
+                        model, voice, language_code,
+                    )
+                except Exception as e:
+                    logger.error("Gemini Live: setup send failed: {}", e)
+                    return
+                # Diagnostic: track setupComplete receipt
+                _setup_sent_t = time.perf_counter()
                 async for raw in gem:
                     try:
                         obj = json.loads(raw) if isinstance(raw, str) else json.loads(raw.decode("utf-8"))
                     except Exception:
                         logger.debug("Ignoring malformed JSON from Gemini Live")
+                        continue
+                    if obj.get("setupComplete") is not None:
+                        if not gemini_setup_complete.is_set():
+                            gemini_setup_complete.set()
+                            _sc_elapsed = (time.perf_counter() - _setup_sent_t) * 1000
+                            logger.info("Gemini Live: setupComplete received in {:.0f}ms — session active", _sc_elapsed)
                         continue
                     if obj.get("error"):
                         _err = obj["error"]
@@ -1482,6 +1506,13 @@ async def handle_vobiz_ws_live(
                     if it.get("text"):
                         last_in_user += str(it.get("text") or "")
                         last_meaningful_t = time.perf_counter()
+                        if not greeting_stt_seen:
+                            greeting_stt_seen = True
+                            logger.info(
+                                "DIAG greeting STT: first user speech detected at +{:.0f}ms — text={!r}",
+                                (time.perf_counter() - _opening_t0) * 1000,
+                                (it.get("text") or "")[:60],
+                            )
                         latency.on_stt_text()
                         logger.info("Gemini Live STT: {!r}", last_in_user)
                         # Prefetch RAG while the user is still speaking so the context is
@@ -1499,6 +1530,7 @@ async def handle_vobiz_ws_live(
                     if sc.get("activityEnd") is not None or obj.get("activityEnd") is not None:
                         response_t0 = time.perf_counter()
                         first_byte_logged = False
+                        turn_model_bytes = 0
                         latency.on_activity_end()
                         if live_rag_context and len(prior_16k_queue) == 0:
                             activity_end_seq += 1
@@ -1570,10 +1602,13 @@ async def handle_vobiz_ws_live(
                         if not b64:
                             continue
                         pcm = base64.b64decode(b64)
+                        turn_model_bytes += len(pcm)
 
-                        # During greeting phase or while scripted PCM is still on the line,
-                        # do not interleave LLM audio — the scripted greeting must play cleanly.
-                        if _in_greeting_phase() or len(prior_16k_queue) > 0:
+                        # While scripted PCM is still physically draining to the handset,
+                        # hold Gemini audio to avoid overlap. The greeting grace period
+                        # (_in_greeting_phase) must NOT gate audio output — it only guards
+                        # against interruption events and user mic forwarding.
+                        if len(prior_16k_queue) > 0:
                             continue
                         had_model_audio_turn = True
                         model_generation_active = True
@@ -1610,6 +1645,43 @@ async def handle_vobiz_ws_live(
 
                     if sc.get("turnComplete") or sc.get("generationComplete"):
                         last_meaningful_t = time.perf_counter()
+                        if turn_model_bytes == 0:
+                            logger.warning(
+                                "DIAG model-turn: turnComplete but ZERO audio bytes — "
+                                "model produced no speech (had_audio={}, greeting_phase={}, "
+                                "prior_pcm_bytes={}, camp={}). "
+                                "Check: model availability, API key, system prompt clarity.",
+                                had_model_audio_turn,
+                                _in_greeting_phase(),
+                                len(prior_16k_queue),
+                                camp_id,
+                            )
+                        else:
+                            logger.info(
+                                "DIAG model-turn: turnComplete — model sent {} bytes 24kHz this turn (had_audio={})",
+                                turn_model_bytes,
+                                had_model_audio_turn,
+                            )
+
+                        # Retry nudge: if the model produced too little audio on the
+                        # opening turn, send a stronger nudge so it speaks its greeting.
+                        if (
+                            turn_model_bytes < _MIN_MODEL_AUDIO_BYTES
+                            and _retry_nudge_count < 2
+                            and not had_model_audio_turn
+                        ):
+                            _retry_nudge_count += 1
+                            logger.warning(
+                                "DIAG retry-nudge: model produced only {} bytes (<{} threshold) — "
+                                "sending retry nudge (attempt {}/2)",
+                                turn_model_bytes,
+                                _MIN_MODEL_AUDIO_BYTES,
+                                _retry_nudge_count,
+                            )
+                            try:
+                                await gemini_send_retry_nudge(gem, attempt=_retry_nudge_count)
+                            except Exception as _rerr:
+                                logger.warning("DIAG retry-nudge send failed: {}", _rerr)
                         latency.log_turn_summary(logger)
                         model_generation_active = False
                         if len(prior_16k_queue) == 0 and pending_audio_24k:
@@ -1659,17 +1731,33 @@ async def handle_vobiz_ws_live(
                         first_byte_logged = False
                         last_rag_inject_key = ""
 
-                logger.info("Gemini Live upstream WebSocket recv loop ended")
+                _setup_ok = gemini_setup_complete.is_set()
+                logger.info(
+                    "Gemini Live upstream WebSocket recv loop ended (setupComplete={}, elapsed={:.0f}ms, "
+                    "had_model_audio={}, camp={})",
+                    _setup_ok,
+                    (time.perf_counter() - _opening_t0) * 1000,
+                    had_model_audio_turn,
+                    camp_id,
+                )
+                if not _setup_ok:
+                    logger.error(
+                        "Gemini Live recv loop ended WITHOUT setupComplete — session was never active. "
+                        "User audio was BLOCKED for the entire session. "
+                        "Likely causes: invalid API key, model '{}' not available, quota exceeded, "
+                        "or network issue. The fallback TTS greeting task will attempt to deliver audio.",
+                        model,
+                    )
 
             async def pump_mixed_to_vobiz() -> None:
                 nonlocal model_generation_active
-                # Wait for Vobiz stream to be ready, but with a timeout so we don't
-                # block forever if the start event is delayed.
+                # Start sending audio immediately — don't wait for the Vobiz "start" event.
+                # Vobiz may timeout the call if it detects silence on the line for >5s, and
+                # the start event can be delayed under some network conditions. The mixer
+                # sends silence/comfort noise until real audio arrives from Gemini.
                 _mixer_start_t = time.perf_counter()
-                try:
-                    await asyncio.wait_for(vobiz_stream_started.wait(), timeout=5.0)
-                except asyncio.TimeoutError:
-                    logger.warning("pump_mixed_to_vobiz: vobiz_stream_started timeout — continuing anyway")
+                if not vobiz_stream_started.is_set():
+                    logger.info("pump_mixed_to_vobiz: starting immediately (no wait for vobiz stream start)")
                 logger.info(
                     "Mixer started for camp={} call={} stream={} (waited {:.0f}ms, stream_started={})",
                     camp_id,
@@ -1692,6 +1780,15 @@ async def handle_vobiz_ws_live(
                 # Last sample value for hold-last-sample technique (prevents clicks/pops from silence padding)
                 _hold_l: int = 0  # left channel (mono = uses left)
                 
+                # Batched send: accumulate 8 frames (160 ms) then send as one WS message.
+                # On a 2-core VPS each ws.send_text() blocks ~280 ms; batching cuts
+                # 50 sends/sec down to ~6 sends/sec.
+                _outbuf = bytearray()
+                _BATCH_FRAMES = 8
+                _BATCH_BYTES = chunk_bytes * _BATCH_FRAMES
+                _flush_interval = 0.02 * _BATCH_FRAMES
+                _next_flush = time.perf_counter()
+                
                 def _hold_pad(length: int) -> bytes:
                     """Generate padding bytes that hold the last output sample value
                     instead of going to zero abruptly — eliminates click/pop at boundaries."""
@@ -1710,16 +1807,14 @@ async def handle_vobiz_ws_live(
                     else:
                         q_len = len(gemini_16k_queue)
                         if not is_playing_gemini:
-                            # Latency opt: for the first Gemini response, start playout
-                            # immediately on any audio (skip prebuffer gate) to shave
-                            # ~60ms off the opening reply.
                             if _first_gemini_response and q_len > 0:
                                 is_playing_gemini = True
                                 _first_gemini_response = False
-                                logger.info("Gemini outbound first-response playout ({} bytes) — skipping prebuffer [OPENING_TIMING | playout_start | +{:.0f}ms]", q_len, (time.perf_counter() - _opening_t0) * 1000)
+                                logger.info("Gemini outbound first response ({} bytes) — immediate playout", q_len)
                             elif q_len >= PREBUFFER_BYTES or (not model_generation_active and q_len > 0):
                                 is_playing_gemini = True
-                                _first_gemini_response = False
+                                if _first_gemini_response:
+                                    _first_gemini_response = False
                                 logger.info("Gemini outbound jitter buffer filled ({} bytes, active={}) — starting playout", q_len, model_generation_active)
                         
                         if is_playing_gemini:
@@ -1780,30 +1875,39 @@ async def handle_vobiz_ws_live(
                         bg_pos,
                         len(gemini_pcm) // 2 if gemini_pcm else chunk_samples,
                     )
-                    try:
-                        await send_play_audio(
-                            ws, mixed, VOBIZ_SR, call_recorder=call_rec
-                        )
-                    except Exception as e:
-                        # If WS is closing/closed, exit the loop cleanly instead of spamming warnings.
-                        from starlette.websockets import WebSocketState
-                        _closed_states = {WebSocketState.DISCONNECTED}
-                        if hasattr(WebSocketState, 'CLOSING'):
-                            _closed_states.add(WebSocketState.CLOSING)
-                        if hasattr(ws, 'client_state') and ws.client_state in _closed_states:
-                            logger.debug("Vobiz WS closed during playout — exiting mixer")
-                            return
-                        logger.warning("Vobiz playAudio send failed: {}", e)
+                    # Record individual frame to call_recorder, then batch for WS send
+                    if call_rec is not None:
+                        call_rec.add_outbound(mixed)
+                    _outbuf.extend(mixed)
+                    now = time.perf_counter()
+                    if len(_outbuf) >= _BATCH_BYTES or (now >= _next_flush and _outbuf):
+                        try:
+                            await send_play_audio_batched(
+                                ws, bytes(_outbuf), VOBIZ_SR
+                            )
+                        except Exception as e:
+                            # If WS is closing/closed, exit the loop cleanly instead of spamming warnings.
+                            from starlette.websockets import WebSocketState
+                            _closed_states = {WebSocketState.DISCONNECTED}
+                            if hasattr(WebSocketState, 'CLOSING'):
+                                _closed_states.add(WebSocketState.CLOSING)
+                            if hasattr(ws, 'client_state') and ws.client_state in _closed_states:
+                                logger.debug("Vobiz WS closed during playout — exiting mixer")
+                                return
+                            logger.warning("Vobiz playAudio send failed: {}", e)
+                        _outbuf.clear()
+                        _next_flush = now + _flush_interval
 
-                    # Pace: one 20ms frame per tick
+                    # Grid-paced timing: align each tick to a 20ms wall clock grid.
+                    # NOTE: must sleep the FULL inter-tick gap (not capped at 10ms) so
+                    # the mixer runs at real-time. Capping the sleep made the loop emit
+                    # 20ms of audio every ~12ms (~1.7x), draining Gemini's jitter buffer
+                    # and forcing hold-sample padding -> audible stutter after the greeting.
+                    if now < next_wakeup:
+                        await asyncio.sleep(min(0.05, next_wakeup - now))
                     next_wakeup += 0.02
-                    sleep_time = next_wakeup - time.perf_counter()
-                    if sleep_time > 0:
-                        await asyncio.sleep(sleep_time)
-                    else:
-                        # Reset timing grid on any delay to prevent cumulative drift
-                        # which causes buffer underflow and audio stuttering
-                        next_wakeup = time.perf_counter()
+                    if next_wakeup < now - 0.02:
+                        next_wakeup = now + 0.02
 
             async def silence_watchdog() -> None:
                 """Hang up the call if neither side has done anything meaningful for
@@ -1813,6 +1917,14 @@ async def handle_vobiz_ws_live(
                 the watchdog is paused to allow greeting playback + first AI response."""
                 while True:
                     await asyncio.sleep(5.0)
+                    # If Vobiz stream never started, don't fire silence watchdog —
+                    # the call isn't actually active (infrastructure issue).
+                    if not vobiz_stream_started.is_set():
+                        logger.debug(
+                            "Silence watchdog: Vobiz stream not started yet — skipping (camp={})",
+                            camp_id,
+                        )
+                        continue
                     # Grace period: don't fire during the first seconds after stream starts
                     if vobiz_stream_started_at > 0:
                         elapsed_since_stream = time.perf_counter() - vobiz_stream_started_at
@@ -1827,12 +1939,13 @@ async def handle_vobiz_ws_live(
                     if idle >= SILENCE_HANGUP_SEC:
                         logger.warning(
                             "Silence watchdog: idle for {:.0f}s (>= {:.0f}s) — REST hangup (call_uuid={}) "
-                            "[stream started {:.0f}s ago, grace={:.0f}s]",
+                            "[stream started {:.0f}s ago, grace={:.0f}s, setup_complete={}]",
                             idle,
                             SILENCE_HANGUP_SEC,
                             state.call_id,
                             (time.perf_counter() - vobiz_stream_started_at) if vobiz_stream_started_at else -1,
                             SILENCE_GRACE_SEC,
+                            gemini_setup_complete.is_set(),
                         )
                         await terminate_call(
                             ws,
@@ -1842,6 +1955,56 @@ async def handle_vobiz_ws_live(
                             drain_seconds=0.0,
                         )
                         return
+
+            async def greeting_silence_watchdog() -> None:
+                """If no user STT is detected within ~9s after greeting + setup, nudge Gemini
+                to prompt the callee. Safety net for cases where:
+                  - The scripted greeting's system prompt says \"wait for customer\" but VAD
+                    never fires (user silent / speech too soft).
+                  - The greeting phase grace period previously blocked user audio entirely.
+                  - Gemini's VAD doesn't detect the callee's first utterance.
+                """
+                logger.info("Greeting silence watchdog: started (role={}, scripted_greeting={} bytes)", role, _prior_opening_bytes_at_connect)
+                try:
+                    await asyncio.wait_for(gemini_setup_complete.wait(), timeout=12.0)
+                except asyncio.TimeoutError:
+                    logger.warning("Greeting silence watchdog: setupComplete not received in 12s — aborting")
+                    return
+                # Wait for greeting grace period to expire and a brief user response window.
+                # The session uses FIRST_COMPLETED so this must NOT be the shortest task.
+                for _ in range(6):
+                    await asyncio.sleep(1.5)
+                    if greeting_stt_seen:
+                        logger.info("Greeting silence watchdog: user STT arrived — no nudge needed, staying alive")
+                        while True:
+                            await asyncio.sleep(3600)  # keep task alive so FIRST_COMPLETED doesn't fire
+                if not greeting_stt_seen:
+                    logger.info(
+                        "Greeting silence watchdog: no STT after {:.0f}s post-setup — sending silence prompt",
+                        9.0,
+                    )
+                    try:
+                        await gem.send(json.dumps({
+                            "clientContent": {
+                                "turns": [{
+                                    "role": "user",
+                                    "parts": [{
+                                        "text": (
+                                            "[The callee has not responded to the greeting yet. "
+                                            "Ask them if they are on the line — e.g. \"Hello? Are you there?\" "
+                                            "— then wait briefly for their reply. Do NOT repeat the opening line.]"
+                                        )
+                                    }],
+                                }],
+                                "turnComplete": True,
+                            }
+                        }))
+                        logger.info("Greeting silence watchdog: nudge sent to Gemini")
+                    except Exception as exc:
+                        logger.warning("Greeting silence watchdog: nudge send failed: {}", exc)
+                    # Keep task alive so FIRST_COMPLETED doesn't fire
+                    while True:
+                        await asyncio.sleep(3600)
 
             async def user_silence_watchdog() -> None:
                 # Disabled — sleep forever so it does not trigger asyncio.wait FIRST_COMPLETED
@@ -1869,6 +2032,132 @@ async def handle_vobiz_ws_live(
             task_dog = asyncio.create_task(silence_watchdog(), name="silence_watchdog")
             task_user_silence = asyncio.create_task(user_silence_watchdog(), name="user_silence_watchdog")
             task_max_dur = asyncio.create_task(max_duration_watchdog(), name="max_duration_watchdog")
+            task_greet_dog = asyncio.create_task(greeting_silence_watchdog(), name="greeting_silence_watchdog")
+
+            # Diagnostic: warn if setupComplete not received within 8s
+            # Also actively triggers TTS fallback and eventually terminates the call.
+            async def _setup_complete_watchdog() -> None:
+                try:
+                    await asyncio.wait_for(gemini_setup_complete.wait(), timeout=8.0)
+                    return  # setupComplete arrived — all good
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "DIAG: setupComplete NOT received within 8s — Gemini session may be hung. "
+                        "Check API key validity and model availability (model={}). "
+                        "User audio is BLOCKED until setupComplete arrives.",
+                        model,
+                    )
+                    # Send a text nudge as a fallback to try to unblock Gemini
+                    try:
+                        await gem.send(json.dumps({
+                            "clientContent": {
+                                "turns": [{"role": "user", "parts": [{"text": "Hello, are you there?"}]}],
+                                "turnComplete": True,
+                            }
+                        }))
+                        logger.info("DIAG: fallback text nudge sent to Gemini (setupComplete was missing)")
+                    except Exception as _nudge_exc:
+                        logger.warning("DIAG: fallback nudge failed: {}", _nudge_exc)
+                    # Wait 5 more seconds — if setupComplete still not received, trigger TTS fallback
+                    try:
+                        await asyncio.wait_for(gemini_setup_complete.wait(), timeout=5.0)
+                        return  # setupComplete arrived — we're good
+                    except asyncio.TimeoutError:
+                        logger.error(
+                            "DIAG: setupComplete STILL not received after 13s total — "
+                            "triggering immediate TTS greeting fallback (model={}, camp={}). "
+                            "Likely cause: invalid API key, model not available, or billing issue.",
+                            model,
+                            camp_id,
+                        )
+                        # Actively trigger the TTS greeting instead of waiting for the
+                        # separate _fallback_greeting_tts timer (which fires at 5s and
+                        # may race with this). If the TTS task already fired, the call
+                        # is already handled. If it hasn't, force it now.
+                        if not had_model_audio_turn and len(prior_16k_queue) == 0 and opening_line and not fallback_tts_played:
+                            fallback_tts_played = True
+                            try:
+                                from services.gemini_tts import gemini_synthesize_pcm, get_gemini_tts_httpx
+                                tts_client = await get_gemini_tts_httpx()
+                                pcm_bytes, sr = await asyncio.wait_for(
+                                    gemini_synthesize_pcm(
+                                        tts_client,
+                                        text=opening_line,
+                                        voice=voice,
+                                        style_mode="opening",
+                                    ),
+                                    timeout=15.0,
+                                )
+                                if pcm_bytes and len(pcm_bytes) > 100:
+                                    if sr != VOBIZ_SR:
+                                        pcm_bytes = pcm_resample(pcm_bytes, sr, VOBIZ_SR)
+                                    logger.info(
+                                        "SETUP_WATCHDOG TTS: greeting PCM generated ({} bytes) — sending to Vobiz",
+                                        len(pcm_bytes),
+                                    )
+                                    await send_play_audio_batched(ws, pcm_bytes, VOBIZ_SR)
+                                    if call_rec is not None:
+                                        call_rec.add_outbound(pcm_bytes)
+                                    last_meaningful_t = time.perf_counter()
+                                    append_turn(
+                                        live_log_id, "assistant", opening_line,
+                                        "vobiz-live", base_dir=log_dir,
+                                        note="setup_watchdog_tts_greeting",
+                                    )
+                                else:
+                                    logger.warning("SETUP_WATCHDOG TTS: empty/short PCM ({} bytes)", len(pcm_bytes or b""))
+                            except asyncio.TimeoutError:
+                                logger.warning("SETUP_WATCHDOG TTS: Gemini TTS timed out")
+                            except Exception as tts_exc:
+                                logger.warning("SETUP_WATCHDOG TTS: generation failed: {}", tts_exc)
+                            # Last resort: try disk greeting PCM if TTS failed
+                            if not fallback_tts_played:
+                                try:
+                                    from core.greeting_pcm import load_recorded_greeting_pcm
+                                    recorded = load_recorded_greeting_pcm(role, greeting_text=greeting_text or opening_line)
+                                    if recorded:
+                                        pcm_bytes, in_sr = recorded
+                                        if in_sr != VOBIZ_SR:
+                                            pcm_bytes = pcm_resample(pcm_bytes, in_sr, VOBIZ_SR)
+                                        logger.warning(
+                                            "SETUP_WATCHDOG DISK_FALLBACK: playing recorded greeting PCM ({} bytes)",
+                                            len(pcm_bytes),
+                                        )
+                                        await send_play_audio_batched(ws, pcm_bytes, VOBIZ_SR)
+                                        if call_rec is not None:
+                                            call_rec.add_outbound(pcm_bytes)
+                                        last_meaningful_t = time.perf_counter()
+                                        append_turn(
+                                            live_log_id, "assistant", opening_line or "greeting",
+                                            "vobiz-live", base_dir=log_dir,
+                                            note="setup_watchdog_disk_greeting",
+                                        )
+                                except Exception as disk_exc:
+                                    logger.warning("SETUP_WATCHDOG DISK_FALLBACK: disk greeting also failed: {}", disk_exc)
+                        # After TTS greeting attempt, wait 10 more seconds for Gemini to recover.
+                        # If setupComplete still hasn't arrived, terminate the zombie call.
+                        try:
+                            await asyncio.wait_for(gemini_setup_complete.wait(), timeout=10.0)
+                            return  # Gemini recovered
+                        except asyncio.TimeoutError:
+                            logger.error(
+                                "DIAG: setupComplete NEVER received — terminating zombie call (camp={}). "
+                                "ALL audio sources exhausted: no Gemini, no TTS fallback, no scripted PCM.",
+                                camp_id,
+                            )
+                            await terminate_call(
+                                ws,
+                                call_uuid=state.call_id,
+                                auth_id=vobiz_auth_id,
+                                auth_token=vobiz_auth_token,
+                                drain_seconds=0.0,
+                            )
+                except Exception as _watchdog_exc:
+                    logger.warning("DIAG: setup watchdog error: {}", _watchdog_exc)
+
+            _task = asyncio.create_task(_setup_complete_watchdog())
+            _background_tasks.add(_task)
+            _task.add_done_callback(_background_tasks.discard)
 
             # When no scripted PCM: prompt Gemini to speak the opening as soon as the leg is up.
             needs_live_opening_nudge = _prior_opening_bytes_at_connect == 0 and bool(
@@ -1884,6 +2173,12 @@ async def handle_vobiz_ws_live(
 
             async def _send_live_opening_nudge(label: str) -> None:
                 if not needs_live_opening_nudge:
+                    return
+                # Never send a clientContent turn before the session is configured.
+                try:
+                    await asyncio.wait_for(gemini_setup_complete.wait(), timeout=10.0)
+                except asyncio.TimeoutError:
+                    logger.warning("Gemini Live: opening nudge skipped (no setupComplete in 10s)")
                     return
                 try:
                     await gemini_send_live_opening_turn_nudge(gem)
@@ -1907,9 +2202,146 @@ async def handle_vobiz_ws_live(
                 _background_tasks.add(_task)
                 _task.add_done_callback(_background_tasks.discard)
 
+            # Fire-and-forget nudge for scripted-greeting calls: once setupComplete,
+            # send a clientContent turn so Gemini speaks the follow-up immediately
+            # instead of waiting for user audio (which keeps the call alive past ~4s).
+            async def _continue_after_greeting_nudge() -> None:
+                try:
+                    await asyncio.wait_for(gemini_setup_complete.wait(), timeout=10.0)
+                except asyncio.TimeoutError:
+                    return
+                if _prior_opening_bytes_at_connect == 0:
+                    return  # Already handled by _opening_nudge_after_setup
+                try:
+                    await gem.send(json.dumps({
+                        "clientContent": {
+                            "turns": [{"role": "user", "parts": [{"text": "The recorded greeting just played. Now speak to the callee naturally — introduce yourself and start the conversation as instructed."}]}],
+                            "turnComplete": True,
+                        }
+                    }))
+                    logger.info("Greeting continuation nudge sent to Gemini")
+                except Exception as exc:
+                    logger.warning("Greeting continuation nudge failed: {}", exc)
+
+            _task = asyncio.create_task(_continue_after_greeting_nudge())
+            _background_tasks.add(_task)
+            _task.add_done_callback(_background_tasks.discard)
+
+            # ── CRITICAL: Fallback TTS greeting when Gemini is silent ──────
+            # When gemini_live_first_opening=true and the Gemini session fails
+            # to produce audio (setupComplete timeout, model error, quota),
+            # generate the greeting via REST TTS and play it directly to Vobiz.
+            # This prevents the "AI completely silent" scenario.
+            async def _fallback_greeting_tts() -> None:
+                """Generate + play TTS greeting if Gemini hasn't produced audio within 2.5s."""
+                nonlocal fallback_tts_played
+                try:
+                    # Wait 2.5s — if Gemini hasn't spoken by then, it likely won't.
+                    # Reduced from 5s (was 12s) to get audio to the caller before Vobiz silence timeout (~5-6s).
+                    await asyncio.sleep(2.5)
+                    # If the call already ended or greeting was delivered, bail.
+                    if _call_ended():
+                        return
+                    if had_model_audio_turn or len(prior_16k_queue) > 0:
+                        return  # Gemini already spoke or scripted greeting played
+                    if fallback_tts_played:
+                        return  # Watchdog already triggered TTS
+                    if not opening_line:
+                        return
+                    fallback_tts_played = True
+                    logger.warning(
+                        "FALLBACK TTS: Gemini produced no audio after 2.5s — "
+                        "generating TTS greeting for camp={}",
+                        camp_id,
+                    )
+                    try:
+                        from services.gemini_tts import gemini_synthesize_pcm, get_gemini_tts_httpx
+                        tts_client = await get_gemini_tts_httpx()
+                        pcm_bytes, sr = await asyncio.wait_for(
+                            gemini_synthesize_pcm(
+                                tts_client,
+                                text=opening_line,
+                                voice=voice,
+                                style_mode="opening",
+                            ),
+                            timeout=15.0,
+                        )
+                        if pcm_bytes and len(pcm_bytes) > 100:
+                            # Resample to Vobiz's 16kHz if needed
+                            if sr != VOBIZ_SR:
+                                pcm_bytes = pcm_resample(pcm_bytes, sr, VOBIZ_SR)
+                            logger.info(
+                                "FALLBACK TTS: greeting PCM generated ({} bytes @ {} Hz) — sending to Vobiz",
+                                len(pcm_bytes), VOBIZ_SR,
+                            )
+                            # Send directly to Vobiz
+                            await send_play_audio_batched(ws, pcm_bytes, VOBIZ_SR)
+                            # Record to call recorder
+                            if call_rec is not None:
+                                call_rec.add_outbound(pcm_bytes)
+                            # Update last_meaningful_t so silence watchdog doesn't fire
+                            nonlocal last_meaningful_t
+                            last_meaningful_t = time.perf_counter()
+                            # Log the greeting
+                            append_turn(
+                                live_log_id, "assistant", opening_line,
+                                "vobiz-live", base_dir=log_dir,
+                                note="fallback_tts_greeting",
+                            )
+                        else:
+                            logger.warning("FALLBACK TTS: generated empty/short PCM ({} bytes)", len(pcm_bytes or b""))
+                    except asyncio.TimeoutError:
+                        logger.warning("FALLBACK TTS: Gemini TTS timed out after 15s")
+                    except Exception as tts_exc:
+                        logger.warning("FALLBACK TTS: generation failed: {}", tts_exc)
+                    # Last resort: try loading the disk greeting PCM if TTS failed
+                    if not fallback_tts_played:
+                        try:
+                            from core.greeting_pcm import load_recorded_greeting_pcm
+                            recorded = load_recorded_greeting_pcm(role, greeting_text=greeting_text or opening_line)
+                            if recorded:
+                                pcm_bytes, in_sr = recorded
+                                if in_sr != VOBIZ_SR:
+                                    pcm_bytes = pcm_resample(pcm_bytes, in_sr, VOBIZ_SR)
+                                logger.warning(
+                                    "DISK_FALLBACK: playing recorded greeting PCM ({} bytes) after TTS failure",
+                                    len(pcm_bytes),
+                                )
+                                await send_play_audio_batched(ws, pcm_bytes, VOBIZ_SR)
+                                if call_rec is not None:
+                                    call_rec.add_outbound(pcm_bytes)
+                                last_meaningful_t = time.perf_counter()
+                                append_turn(
+                                    live_log_id, "assistant", opening_line or "greeting",
+                                    "vobiz-live", base_dir=log_dir,
+                                    note="disk_fallback_greeting",
+                                )
+                        except Exception as disk_exc:
+                            logger.warning("DISK_FALLBACK: failed to load greeting PCM: {}", disk_exc)
+                except asyncio.CancelledError:
+                    pass
+                except Exception as exc:
+                    logger.warning("FALLBACK TTS: unexpected error: {}", exc)
+
+            def _call_ended() -> bool:
+                """Check if the call has already ended (for early-exit in fallback tasks)."""
+                return bool(
+                    (camp_id and camp_id in _CAMPAIGN_DATA and _CAMPAIGN_DATA[camp_id].get("_call_ended_at"))
+                    or not vobiz_stream_started.is_set()
+                )
+
+            if not defer_gemini_until_scripted:
+                _task = asyncio.create_task(_fallback_greeting_tts())
+                _background_tasks.add(_task)
+                _task.add_done_callback(_background_tasks.discard)
+                logger.info(
+                    "DIAG fallback TTS: enabled (no scripted PCM) — will fire at +{:.0f}s if Gemini silent",
+                    2.5,
+                )
+
             try:
                 done, pending = await asyncio.wait(
-                    {task_in, task_out, task_mix, task_dog, task_user_silence, task_max_dur}, return_when=asyncio.FIRST_COMPLETED
+                    {task_in, task_out, task_mix, task_dog, task_user_silence, task_max_dur, task_greet_dog}, return_when=asyncio.FIRST_COMPLETED
                 )
                 for ft in done:
                     exc = ft.exception()
@@ -1928,6 +2360,8 @@ async def handle_vobiz_ws_live(
                 # Diagnostic summary
                 _total_session_sec = time.perf_counter() - _opening_t0
                 _had_greeting = _prior_opening_bytes_at_connect > 0
+                _setup_ok = gemini_setup_complete.is_set()
+                _had_model_audio = had_model_audio_turn
                 _done_info = []
                 for ft in done:
                     name = ft.get_name()
@@ -1938,19 +2372,31 @@ async def handle_vobiz_ws_live(
                         _done_info.append(f"{name}:cancelled")
                     else:
                         _done_info.append(f"{name}:ok={type(ft.result()).__name__}")
+                # Key diagnostic: log why the call was silent (if it was)
+                _silence_reason = ""
+                if not _setup_ok:
+                    _silence_reason = "SILENCE_CAUSE: Gemini setupComplete never received (bad API key? model unavailable? quota?)"
+                elif not _had_model_audio and not _had_greeting:
+                    _silence_reason = "SILENCE_CAUSE: No greeting PCM AND no model audio produced"
+                elif not _had_model_audio:
+                    _silence_reason = "SILENCE_CAUSE: Model produced no audio (check system prompt / opening nudge)"
+                if _silence_reason:
+                    logger.error("DIAG {}", _silence_reason)
                 logger.info(
                     "DIAG SESSION END: role={} camp={} duration={:.1f}s had_greeting_pcm={} "
-                    "stream_started_at={:.0f}s gemini_connected={} tasks_done=[{}]",
+                    "setup_complete={} had_model_audio={} stream_started_at={:.0f}s gemini_connected={} tasks_done=[{}]",
                     role,
                     camp_id,
                     _total_session_sec,
                     _had_greeting,
+                    _setup_ok,
+                    _had_model_audio,
                     vobiz_stream_started_at - _opening_t0 if vobiz_stream_started_at else -1,
                     _gem_live_session_t0 > 0 if '_gem_live_session_t0' in dir() else False,
                     "; ".join(_done_info),
                 )
             finally:
-                for t in {task_in, task_out, task_mix, task_dog, task_user_silence, task_max_dur}:
+                for t in {task_in, task_out, task_mix, task_dog, task_user_silence, task_max_dur, task_greet_dog}:
                     if not t.done():
                         t.cancel()
                         try: await t

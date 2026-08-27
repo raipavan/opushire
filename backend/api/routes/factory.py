@@ -369,7 +369,7 @@ async def factory_start_call(agent_id: str, req: StartCallRequest):
                         "ring_method": "POST",
                         "hangup_url": f"{v_base}/vobiz/hangup?camp_id={call_id}",
                         "hangup_method": "POST",
-                        "hangup_on_ring": "60",
+                        "hangup_on_ring": "3600",
                     },
                 )
                 _f_uuid = _f_resp.get("request_uuid") or ""

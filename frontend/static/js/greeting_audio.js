@@ -12,7 +12,7 @@ function _tuningRoleQ() {
     if (typeof tuningRoleForApi === 'function') {
         return encodeURIComponent(tuningRoleForApi());
     }
-    return typeof apiRoleQ === 'function' ? apiRoleQ() : encodeURIComponent('sellers');
+    return typeof apiRoleQ === 'function' ? apiRoleQ() : encodeURIComponent('data_edge');
 }
 
 async function _tuningApiError(res) {

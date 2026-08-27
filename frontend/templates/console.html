@@ -2421,7 +2421,48 @@
     <script src="/static/js/leads_feedback.js?v=1"></script>
     <script src="/static/js/app.js?v=38"></script>
 
-    <script>console.log('Data Edge Console Initialized');</script>
+    <script>
+    window.onerror = function(m,s,l,c,e) {
+        var d = document.getElementById('debug-panel');
+        if(d) d.innerHTML += '<div style="color:red">ERR: '+m+' line:'+l+'</div>';
+    };
+    window.addEventListener('unhandledrejection', function(e) {
+        var d = document.getElementById('debug-panel');
+        if(d) d.innerHTML += '<div style="color:red">REJECT: '+(e.reason&&e.reason.message||e.reason)+'</div>';
+    });
+    setTimeout(function(){
+        var d = document.getElementById('debug-panel');
+        if(!d) return;
+        var checks = [
+            'token:' + (typeof token),
+            'syncState:' + (typeof syncState),
+            'syncState_at_start:' + (window.__syncState_at_start||'undef'),
+            'testJsLoaded:' + (typeof __testJsLoaded),
+            'campaignJS:' + (window.__CAMPAIGN_JS_LOADED ? 'YES' : 'NO'),
+            'allLeads:' + (typeof allLeads !== 'undefined' ? allLeads.length : 'undef'),
+            'currentRole:' + (typeof currentRole !== 'undefined' ? currentRole : 'undef'),
+            'stat-total:' + document.getElementById('stat-total')?.textContent,
+            'stat-called:' + document.getElementById('stat-called')?.textContent,
+            'errors:' + (window.__CAPTURED_ERRORS||[]).join(';'),
+        ];
+        d.innerHTML = checks.join(' | ');
+        d.style.display = 'block';
+        // Direct test: try calling syncState now
+        if (typeof syncState === 'function') {
+            syncState().catch(function(e){ d.innerHTML += ' | manualSync_err:' + (e&&e.message||e); });
+        } else {
+            d.innerHTML += ' | syncState STILL undefined after 5s';
+        }
+    }, 5000);
+    // Also try right after scripts load
+    document.addEventListener('DOMContentLoaded', function() {
+        if (typeof syncState === 'undefined') {
+            window.__CAPTURED_ERRORS = window.__CAPTURED_ERRORS || [];
+            window.__CAPTURED_ERRORS.push('syncState_undefined_in_DCL');
+        }
+    });
+    </script>
+    <div id="debug-panel" style="display:none;position:fixed;bottom:0;left:0;right:0;z-index:99999;background:#000;color:#0f0;font:12px monospace;padding:8px;"></div>
 </body>
 
 </html>

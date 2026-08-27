@@ -182,7 +182,7 @@ def enrich_lead_for_console(lead: dict) -> dict:
             rp = resolve_session_recording_path(log_id_raw)
             out["recording_available"] = bool(rp and rp.is_file())
             if out["recording_available"]:
-                role_key = normalize_console_role(str(out.get("role") or "sellers"))
+                role_key = normalize_console_role(str(out.get("role") or "data_edge"))
                 out["recording_url"] = (
                     f"/api/campaign/lead/{out['id']}/recording?role={role_key}"
                 )
@@ -258,7 +258,7 @@ def enrich_lead_for_console(lead: dict) -> dict:
     else:
         out["contact_display_primary"] = "Unknown"
         out["contact_display_secondary"] = ""
-    role_key = normalize_console_role(str(out.get("role") or "sellers"))
+    role_key = normalize_console_role(str(out.get("role") or "data_edge"))
     lid = out.get("id")
     log_ref = log_id_raw or str(out.get("log_id") or "").strip()
     if lid is not None and log_ref:
@@ -313,7 +313,7 @@ def slim_lead_for_api(lead: dict, *, role: str | None = None) -> dict:
     """Enrich then drop heavy columns so ``/state`` and ``/manifest`` stay small and reliable."""
 
     enriched = enrich_lead_for_console(dict(lead))
-    role_key = normalize_console_role(role or enriched.get("role") or "sellers")
+    role_key = normalize_console_role(role or enriched.get("role") or "data_edge")
     out: dict[str, Any] = {}
     for key in _SLIM_LEAD_KEYS:
         if key in enriched and enriched[key] is not None:

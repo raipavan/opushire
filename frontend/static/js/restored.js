@@ -385,7 +385,7 @@ async function reanalyzeCall() {
 }
 
 // ─── Render Lead Manifest ───
-const MANIFEST_TABLE_ROW_CAP = 800;
+const MANIFEST_TABLE_ROW_CAP = 10000;
 
 function renderManifest() {
     const tbody = document.getElementById('manifest-tbody');

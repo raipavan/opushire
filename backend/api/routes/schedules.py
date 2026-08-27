@@ -46,7 +46,7 @@ router = APIRouter(prefix="/api/schedules", tags=["schedules"])
 def _role(request: Request, fallback: Optional[str] = None) -> str:
     from core.auth import console_role_from_request
 
-    return console_role_from_request(request, default=fallback or "sellers")
+    return console_role_from_request(request, default=fallback or "data_edge")
 
 
 class ScheduleCreate(BaseModel):

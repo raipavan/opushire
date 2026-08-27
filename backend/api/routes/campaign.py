@@ -214,16 +214,12 @@ async def upload_leads(file: UploadFile = File(...), request: Request = None):
             text_cols = [c for c in cols if c not in (phone_col, email_col)]
             NAME_KEYWORDS = ['name', 'person', 'client', 'buyer', 'seller', 'agent', 'contact', 'lead', 'customer']
             COMPANY_KEYWORDS = ['company', 'business', 'organization', 'org', 'firm', 'brand', 'employer', 'shop', 'store', 'enterprise']
-            if upload_role == "rfqs":
-                COMPANY_KEYWORDS = COMPANY_KEYWORDS + ['buyer', 'customer', 'account', 'organisation', 'organization name']
 
             def _col_matches(col: str, keywords: list) -> bool:
                 cl = col.strip().lower()
                 return any(kw in cl for kw in keywords)
 
             def _bad_for_contact_field(c: str) -> bool:
-                if upload_role == "rfqs" and _is_product_like_column(c):
-                    return True
                 cl = c.strip().lower()
                 if cl in ('city', 'location', 'state', 'district', 'town', 'address', 'region', 'zone', 'branch', 'pincode', 'zip', 'country') or any(tok in cl for tok in ('city', 'address', 'district')):
                     return True
@@ -232,7 +228,7 @@ async def upload_leads(file: UploadFile = File(...), request: Request = None):
                     or _column_values_mostly_row_numbers(col_values.get(c, []))
                 )
 
-            product_cols = {c for c in text_cols if _is_product_like_column(c)} if upload_role == "rfqs" else set()
+            product_cols = set()
 
             name_col = company_col = None
             for c in text_cols:
@@ -362,8 +358,6 @@ async def upload_leads(file: UploadFile = File(...), request: Request = None):
             if not ph:
                 continue
             raw_name = str(r.get(name_col, "") if name_col else "").strip()
-            if role == "rfqs" and (not raw_name or _is_product_like_column(name_col or "")):
-                raw_name = "Unknown"
             
             raw_segment = "rfq"
             if segment_col:
@@ -793,12 +787,12 @@ async def campaign_reanalyze_all_cancel(request: Request):
 @router.get("/manifest")
 async def campaign_manifest_preview(
     request: Request,
-    limit: int = Query(1500, ge=1, le=20_000, description="Max rows for dashboard Lead Manifest + call list"),
+    limit: int = Query(0, ge=0, description="Max rows for dashboard Lead Manifest + call list (0 = unlimited)"),
 ):
     """Lightweight full-row fetch for UI tables — avoids oversized ``/state`` payloads."""
     role = _campaign_role(request)
     rows = await lead_storage.get_leads(
-        role, limit=min(int(limit), 20_000), order="activity"
+        role, limit=int(limit) if int(limit) > 0 else 9_999_999_999, order="activity"
     )
     enriched = [slim_lead_for_api(dict(r), role=role) for r in rows]
     return {"role": role, "returned": len(enriched), "leads": enriched}
@@ -808,7 +802,7 @@ async def campaign_manifest_preview(
 @router.get("/state")
 async def get_campaign_status(
     request: Request,
-    chart_sample_limit: int = Query(800, ge=50, le=5000, description="Sample size for donut/callback charts embedded in state"),
+    chart_sample_limit: int = Query(2000, ge=50, le=10000, description="Sample size for donut/callback charts embedded in state"),
 ):
     try:
         role = _campaign_role(request)
@@ -819,7 +813,7 @@ async def get_campaign_status(
                 return cached_val
 
         counts = await lead_storage.get_lead_counts(role)
-        sample_cap = min(int(chart_sample_limit), 5000)
+        sample_cap = min(int(chart_sample_limit), 10000)
         chart_rows = await lead_storage.get_leads(role, limit=sample_cap)
         dash = build_campaign_state_dashboard_fields(role, chart_rows)
         chart_leads = [
@@ -845,7 +839,7 @@ async def get_campaign_status(
             
             "chart_sample": chart_leads,
             "leads": chart_leads,
-            "manifest_fetch_hint": {"endpoint": "/api/campaign/manifest", "suggested_limit": min(2500, max(500, sample_cap))},
+            "manifest_fetch_hint": {"endpoint": "/api/campaign/manifest", "suggested_limit": 0},
             "lead_list_truncated": total_in_db > len(chart_leads),
             "leads_returned": len(chart_leads),
             "active_calls": total_active_vobiz_calls(),

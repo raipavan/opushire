@@ -170,8 +170,8 @@ async def maybe_book_dariaan_discovery_meeting(
 ) -> Optional[dict[str, Any]]:
     """Book 30-min discovery on Google Calendar and WhatsApp the Meet link. Returns booking metadata."""
 
-    if (role or "").strip().lower() != "vernikaai":
-        return None
+    # Role removed — function is now a no-op
+    return None
     if not dariaan_meeting_booking_configured():
         logger.debug("Dariaan meeting booking skipped — not fully configured in .env")
         return None

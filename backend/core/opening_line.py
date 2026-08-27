@@ -7,41 +7,14 @@ import re
 
 _ROLE_FALLBACK_GREETINGS = {
     "data_edge": (
-        "Hi, this is Priya from Data Edge. I'm a career counselor — got a quick minute?"
-    ),
-    "sellers": (
-        "Hi, this is Devika from Procucev, Bangalore. Got a quick minute?"
-    ),
-    "buyers": (
-        "Hi, this is Adithi from Procucev Enterprise Solutions, Bangalore. "
-        "I'm a procurement specialist — do you have a quick minute?"
-    ),
-    "rfqs": (
-        "You are a priority vendor, we have shared an invitation email regarding a requirement from our buyers. Please check your email and register on our platform to view the complete details. You can download the RFQ (Request for quotation) and submit your quotation there. Once submitted, you will also be able to view the buyer's details. Or just drop a \"Hi\" on our WhatsApp number 70901 70801 to get a quick access to Qua AI. You can even download RFQs through WhatsApp and submit quotations."
-    ),
-    "param_mahindra": (
-        "હેલો? ગુડ આફ્ટરનૂન સર. હું પરમ મહિન્દ્રામાંથી રાધિકા બોલું છું. મેં તમને એક ક્વોટેશન મોકલ્યું હતું સર."
-    ),
-    "maruti": (
-        "હું Aarohi બોલું છું Uday Autolink માંથી, આજે આપ કેમ છો?"
-    ),
-}
-
-
-# Inbound PSTN — caller dialed our DID; use service-desk style openers (not outbound PMS/campaign lines).
-_ROLE_INBOUND_FALLBACK_GREETINGS = {
-    "maruti": (
-        "હું Aarohi બોલું છું Uday Autolink માંથી, આજે આપ કેમ છો?"
+        "Hi, this is Priya from OpusHire. Is it the right time to speak?"
     ),
 }
 
 
 def packaged_inbound_fallback_greeting(role: str) -> str:
     """Default opener when a customer calls our DID (not outbound campaign dial)."""
-    r = (role or "data_edge").strip().lower()
-    if r in _ROLE_INBOUND_FALLBACK_GREETINGS:
-        return _ROLE_INBOUND_FALLBACK_GREETINGS[r]
-    return packaged_fallback_greeting(r)
+    return packaged_fallback_greeting(role)
 
 
 def packaged_fallback_greeting(role: str) -> str:

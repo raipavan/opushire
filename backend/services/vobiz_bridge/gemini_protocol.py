@@ -28,29 +28,33 @@ def build_live_setup(
     """Build Gemini Live ``setup``. When aggressive VAD is enabled in settings,
 
     Uses ``HIGH`` sensitivity for start/end of speech plus tuneable silence/prefix
-    (see ``GEMINI_LIVE_*`` env vars). ``vad_ultra`` applies slightly tighter timings
-    (Gemini-opens-first flows, e.g. real_estate).
+    (see ``GEMINI_LIVE_*`` env vars). VAD settings are consistent across all call types
+    to ensure uniform audio quality.
+
+    When ``vad_ultra=True``, uses tighter prefix padding and silence duration for
+    lower-latency turn detection (outbound calls where callee responds quickly).
     """
 
     realtime_input_config: dict[str, Any] = {}
     if settings.gemini_live_aggressive_activity_detection:
-        if vad_ultra:
-            prefix_ms = settings.gemini_live_vad_prefix_padding_ms_ultra
-            silence_ms = settings.gemini_live_vad_silence_duration_ms_ultra
-        else:
-            prefix_ms = settings.gemini_live_vad_prefix_padding_ms
-            silence_ms = settings.gemini_live_vad_silence_duration_ms
-            
         import os
-        start_sens = os.getenv("GEMINI_LIVE_VAD_START_SENSITIVITY", "START_SENSITIVITY_HIGH").strip()
-        end_sens = os.getenv("GEMINI_LIVE_VAD_END_SENSITIVITY", "END_SENSITIVITY_HIGH").strip()
-        
+        start_sens = os.getenv("GEMINI_LIVE_VAD_START_SENSITIVITY", "START_SENSITIVITY_BALANCED").strip()
+        end_sens = os.getenv("GEMINI_LIVE_VAD_END_SENSITIVITY", "END_SENSITIVITY_BALANCED").strip()
+
+        # Telephony-tuned timing: prevents phone speaker echo / micro-noise from cutting off AI mid-sentence
+        if vad_ultra:
+            prefix_ms = max(100, int(settings.gemini_live_vad_prefix_padding_ms_ultra))
+            silence_ms = max(200, int(settings.gemini_live_vad_silence_duration_ms_ultra))
+        else:
+            prefix_ms = max(150, int(settings.gemini_live_vad_prefix_padding_ms))
+            silence_ms = max(300, int(settings.gemini_live_vad_silence_duration_ms))
+
         realtime_input_config = {
             "automaticActivityDetection": {
                 "startOfSpeechSensitivity": start_sens,
                 "endOfSpeechSensitivity": end_sens,
-                "prefixPaddingMs": max(8, int(prefix_ms)),
-                "silenceDurationMs": max(32, int(silence_ms)),
+                "prefixPaddingMs": prefix_ms,
+                "silenceDurationMs": silence_ms,
             }
         }
 
@@ -130,6 +134,37 @@ async def gemini_send_live_opening_turn_nudge(gem: Any) -> None:
     )
 
 
+async def gemini_send_retry_nudge(gem: Any, *, attempt: int = 1) -> None:
+    """Send a retry nudge when the model produced little or no audio.
+
+    A more direct prompt that explicitly asks the model to speak its greeting.
+    """
+    await gem.send(
+        json.dumps(
+            {
+                "clientContent": {
+                    "turns": [
+                        {
+                            "role": "user",
+                            "parts": [
+                                {
+                                    "text": (
+                                        "[CRITICAL: You MUST speak your opening greeting NOW. "
+                                        "The call has been connected and you are on the line. "
+                                        "Say your introduction as instructed in your system prompt.]"
+                                    )
+                                }
+                            ],
+                        }
+                    ],
+                    "turnComplete": True,
+                }
+            }
+        )
+    )
+    logger.info("Gemini retry nudge sent (attempt={})", attempt)
+
+
 async def gemini_send_pcm_silence_kick(gem: Any, *, duration_ms: int = 120) -> None:
     n = max(OUT_CHUNK_BYTES, int(VOBIZ_SR * 2 * (duration_ms / 1000.0)))
     n = n & ~1
@@ -184,9 +219,14 @@ GEMINI_LIVE_URL_BASE = (
 
 def build_gemini_live_url_and_headers(api_key: str) -> tuple[str, dict]:
     """Return (wss_url, extra_headers) for the Gemini Live WebSocket.
-    Both legacy keys and new AQ. keys work via the ?key= query parameter.
+
+    Always use the query parameter "?key=" for authentication as the 
+    Google AI Studio Gemini Live WebSocket API requires this format for both
+    legacy AIza... keys and new AQ... keys.
     """
-    return GEMINI_LIVE_URL_TMPL.format(api_key=api_key), {}
+    ak = (api_key or "").strip()
+    return GEMINI_LIVE_URL_TMPL.format(api_key=ak), {}
+
 
 
 

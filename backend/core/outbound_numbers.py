@@ -42,8 +42,6 @@ def resolve_outbound_from_number(role: str, vobiz_cfg: Optional[Mapping[str, obj
 
     if r == "data_edge":
         per_role_raw = settings.vobiz_data_edge_from_number
-    elif r == "buyers":
-        per_role_raw = settings.vobiz_buyers_from_number
     else:
         per_role_raw = ""
     per_role = str(per_role_raw or "").strip()

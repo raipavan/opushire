@@ -26,10 +26,7 @@ router = APIRouter(tags=["vobiz"])
 
 # Inbound DID → role (last 10 digits). Vobiz Answer URL may pass any ?role=; To number wins.
 _INBOUND_DID_ROLE: dict[str, str] = {
-    "8065481138": "maruti",
     "8065481827": "data_edge",
-    "8065480640": "vernikaai",
-    "8065480856": "param_mahindra",
 }
 
 
@@ -88,7 +85,7 @@ def _resolve_inbound_role(query_role: Optional[str], to_phone: Optional[str]) ->
                 mapped,
             )
         return mapped
-    return explicit or "sellers"
+    return explicit or "data_edge"
 
 
 def _build_busy_xml() -> str:
@@ -173,10 +170,23 @@ async def _vobiz_answer_impl(
     stream_base = (settings.vobiz_stream_public_base_url or "").strip().rstrip("/") or base
     wss_url = stream_base.replace("https://", "wss://").replace("http://", "wss://") + "/ws/vobiz"
 
-    params = []
+    # ── Build WSS URL ──────────────────────────────────────────────────
+    # CRITICAL FIX: Vobiz's XML parser cannot decode ``&amp;`` entities inside
+    # the <Stream> text node — any URL containing ``&`` (even when properly
+    # XML-escaped) causes Vobiz to silently drop the WebSocket connection.
+    # This was the root cause of calls never connecting after the first one.
+    #
+    # Solution: encode ALL session parameters in the URL PATH instead of
+    # query strings — zero ampersands = no XML entity issues.
+    #
+    # Path formats:
+    #   /ws/vobiz/c/{camp_id}                    — outbound campaign / manual call
+    #   /ws/vobiz/i/{inbound_role}               — inbound PSTN call
+    #   /ws/vobiz/a/{agent_id}                   — sandbox / factory agent
+    #   /ws/vobiz/c/{camp_id}/a/{agent_id}       — campaign + agent
+    #   /ws/vobiz                                — fallback (no params)
     agent_id = None
     if camp_id:
-        params.append(f"camp_id={camp_id}")
         if camp_id in _CAMPAIGN_DATA or db_lead:
             data = _CAMPAIGN_DATA[camp_id] if camp_id in _CAMPAIGN_DATA else db_lead
             agent_id = data.get("_agent_id") or data.get("agent_id")
@@ -184,21 +194,16 @@ async def _vobiz_answer_impl(
             parts = camp_id.split("-")
             if len(parts) >= 2:
                 agent_id = parts[1]
-
-    if agent_id:
-        params.append(f"agent_id={agent_id}")
-
-    # NOTE: We intentionally do NOT append ``manual_role=...`` to the WSS URL
-    # even for manual calls.  Vobiz's XML parser fails to decode ``&amp;``
-    # entities inside the <Stream> text node, so any URL containing ``&``
-    # (even when properly XML-escaped) causes Vobiz to silently drop the WS
-    # connection.  The role is already determinable on the WS handler side
-    # because the camp_id starts with ``manual_{role}_...``.
-    if not camp_id and normalized_role:
-        params.append(f"inbound_role={normalized_role}")
-
-    if params:
-        wss_url += "?" + "&".join(params)
+        # Outbound / manual call — camp_id goes in the path (no ampersands!)
+        wss_url += f"/c/{camp_id}"
+        if agent_id:
+            wss_url += f"/a/{agent_id}"
+    elif agent_id:
+        # Sandbox agent without camp_id
+        wss_url += f"/a/{agent_id}"
+    elif normalized_role:
+        # Inbound PSTN call — role goes in the path
+        wss_url += f"/i/{normalized_role}"
 
     if stream_base and (
         "trycloudflare.com" in stream_base
@@ -249,9 +254,9 @@ async def health_diagnostic():
     # 1. Gemini API key
     gemini_key = settings.gemini_api_key
     result["checks"]["gemini_api_key"] = {
-        "status": "ok" if gemini_key and gemini_key.startswith("AIza") else "error",
+        "status": "ok" if gemini_key and (gemini_key.startswith("AIza") or gemini_key.startswith("AQ.")) else "error",
         "value": f"{gemini_key[:8]}…{gemini_key[-4:]}" if gemini_key and len(gemini_key) > 12 else "(empty or invalid)",
-        "message": "Valid Google AI Studio key" if gemini_key and gemini_key.startswith("AIza") else "Missing or invalid key",
+        "message": "Valid Google AI Studio key" if gemini_key and (gemini_key.startswith("AIza") or gemini_key.startswith("AQ.")) else "Missing or invalid key",
     }
 
     # 2. Gemini Live config
@@ -293,7 +298,7 @@ async def health_diagnostic():
     # 5. Greeting PCM files
     greetings_dir = Path(__file__).resolve().parent.parent.parent / "data" / "greetings"
     greeting_status = {}
-    for role_name in ("data_edge", "nova_ivf", "maruti"):
+    for role_name in ("data_edge",):
         pcm_path = greetings_dir / f"greeting_{role_name}.pcm"
         meta_path = greetings_dir / f"greeting_{role_name}.pcm.meta"
         if pcm_path.is_file() and pcm_path.stat().st_size > 0:
@@ -445,17 +450,54 @@ async def vobiz_hangup_callback(request: Request):
     return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response/>', media_type="application/xml")
 
 
-@router.websocket("/ws/vobiz")
+@router.websocket("/ws/vobiz/{path_param:path}")
 async def vobiz_ws_endpoint(
     websocket: WebSocket,
-    camp_id: Optional[str] = None,
-    agent_id: Optional[str] = None,
-    inbound_role: Optional[str] = None,
-    manual_role: Optional[str] = None,
+    path_param: str = "",
 ):
+    """Vobiz media WebSocket — path-based parameter routing.
+
+    Path formats (no query strings to avoid Vobiz XML entity issues):
+      /ws/vobiz/c/{camp_id}                    — outbound campaign / manual
+      /ws/vobiz/i/{inbound_role}               — inbound PSTN
+      /ws/vobiz/a/{agent_id}                   — sandbox agent
+      /ws/vobiz/c/{camp_id}/a/{agent_id}       — campaign + agent
+      /ws/vobiz                                — legacy fallback (query params)
+    """
+    camp_id = None
+    agent_id = None
+    inbound_role = None
+    manual_role = None
+
+    if path_param:
+        parts = path_param.strip("/").split("/")
+        i = 0
+        while i < len(parts):
+            seg = parts[i]
+            if seg == "c" and i + 1 < len(parts):
+                camp_id = parts[i + 1]
+                i += 2
+            elif seg == "a" and i + 1 < len(parts):
+                agent_id = parts[i + 1]
+                i += 2
+            elif seg == "i" and i + 1 < len(parts):
+                inbound_role = parts[i + 1]
+                i += 2
+            else:
+                i += 1
+
+    # Legacy fallback: support old query-parameter style for any clients
+    # that haven't migrated yet.
+    if not camp_id and not agent_id and not inbound_role:
+        qp = dict(websocket.query_params)
+        camp_id = qp.get("camp_id")
+        agent_id = qp.get("agent_id")
+        inbound_role = qp.get("inbound_role")
+        manual_role = qp.get("manual_role")
+
     logger.info(
-        "Vobiz WS connect: camp_id={} agent_id={} inbound_role={} manual_role={}",
-        camp_id, agent_id, inbound_role, manual_role,
+        "Vobiz WS connect: path={!r} camp_id={} agent_id={} inbound_role={} manual_role={}",
+        path_param, camp_id, agent_id, inbound_role, manual_role,
     )
     await handle_vobiz_ws_live(
         websocket,

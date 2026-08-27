@@ -447,7 +447,7 @@ _CAMPAIGN_WANT_META_PREFIX = "campaign_want_running_v2"
 
 
 def campaign_want_running_meta_key(role: str) -> str:
-    return f"{_CAMPAIGN_WANT_META_PREFIX}:{(role or 'sellers').strip().lower()}"
+    return f"{_CAMPAIGN_WANT_META_PREFIX}:{(role or 'data_edge').strip().lower()}"
 
 
 async def set_campaign_want_running(role: str, wanted: bool) -> None:
@@ -531,7 +531,7 @@ async def get_role_state(role: str) -> dict:
     return await asyncio.to_thread(_get_role_state_sync, role)
 
 def _get_role_state_sync(role: str) -> dict:
-    role_key = (role or "sellers").strip().lower()
+    role_key = (role or "data_edge").strip().lower()
     fallback_delay = default_inter_call_gap_sec(role_key)
     conn = _get_conn()
     row = conn.execute("SELECT * FROM role_state WHERE role = ?", (role_key,)).fetchone()
@@ -560,7 +560,7 @@ async def save_role_state(role: str, prompt: str = None, rag: str = None, vobiz_
 def _save_role_state_sync(role: str, prompt: str = None, rag: str = None, vobiz_config: dict = None, delay_sec: float = None, greeting_text: str = None):
     def _do():
         conn = _get_conn()
-        r = (role or "sellers").strip().lower()
+        r = (role or "data_edge").strip().lower()
         conn.execute("INSERT OR IGNORE INTO role_state (role) VALUES (?)", (r,))
         updates = []
         params = []
@@ -596,7 +596,7 @@ async def get_lead(role: str, lead_id: int) -> Optional[dict]:
 def _get_lead_sync(role: str, lead_id: int) -> Optional[dict]:
     """Single campaign lead row keyed by SQLite ``id`` and ``role``."""
     conn = _get_conn()
-    r = (role or "sellers").strip().lower()
+    r = (role or "data_edge").strip().lower()
     row = conn.execute(
         "SELECT * FROM leads WHERE role = ? AND id = ?",
         (r, int(lead_id)),
@@ -607,7 +607,7 @@ def _get_lead_sync(role: str, lead_id: int) -> Optional[dict]:
 async def get_leads(
     role: str,
     status: str = None,
-    limit: int = 1000,
+    limit: int = 0,
     *,
     order: str = "created",
 ) -> list[dict]:
@@ -616,7 +616,7 @@ async def get_leads(
 def _get_leads_sync(
     role: str,
     status: str = None,
-    limit: int = 1000,
+    limit: int = 0,
     order: str = "created",
 ) -> list[dict]:
     conn = _get_conn()
@@ -632,11 +632,12 @@ def _get_leads_sync(
                   THEN CAST(start_time AS REAL) ELSE 0.0 END DESC,
              updated_at DESC,
              created_at DESC
-         LIMIT ?
         """
     else:
-        query += " ORDER BY created_at DESC LIMIT ?"
-    params.append(limit)
+        query += " ORDER BY created_at DESC"
+    if int(limit) > 0:
+        query += " LIMIT ?"
+        params.append(limit)
     rows = conn.execute(query, params).fetchall()
     return [_row_to_dict(r) for r in rows]
 
@@ -657,7 +658,7 @@ def _count_leads_with_outbound_attempt_sync(role: str) -> int:
              OR (start_time IS NOT NULL AND CAST(start_time AS REAL) > 0)
           )
         """,
-        ((role or "sellers").strip().lower(),),
+        ((role or "data_edge").strip().lower(),),
     ).fetchone()
     return int(row["c"]) if row else 0
 
@@ -672,7 +673,7 @@ def _get_leads_with_outbound_activity_sync(role: str, limit: int = 32000) -> lis
     activity on older CSV rows still appears alongside ``called_count``.
     """
 
-    role = (role or "sellers").strip().lower()
+    role = (role or "data_edge").strip().lower()
     lim = max(1, min(int(limit), 50000))
     conn = _get_conn()
     rows = conn.execute(
@@ -967,7 +968,7 @@ def _find_lead_by_phone_sync(role: str, raw_phone: str) -> Optional[dict]:
     """Match a lead row by normalized or last-10-digit phone for any campaign role."""
     from core.utils import _norm_phone_str
 
-    role = (role or "sellers").strip().lower()
+    role = (role or "data_edge").strip().lower()
     norm = _norm_phone_str(raw_phone or "")
     conn = _get_conn()
     if norm:
@@ -1790,8 +1791,8 @@ def _finalize_manual_call_record_sync(
             aj,
             camp_id,
         ),
-    )
-    _commit_with_retry(conn)
+        )
+        _commit_with_retry(conn)
     _run_db(_do)
 
 

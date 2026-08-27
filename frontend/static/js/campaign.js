@@ -1,10 +1,13 @@
 // ─── Campaign State Sync ───
+window.__CAMPAIGN_JS_LOADED = true;
 let campaignStateFetchWarned = false;
 let _campaignSyncGen = 0;
 /** Last successful dashboard snapshot for replay when a refresh fails (avoids flashing all zeros). */
 let lastCampaignSnapshot = null;
+/** Server-side total lead count from /api/campaign/state (authoritative). */
+let _serverTotalLeads = 0;
 
-const DEFAULT_MANIFEST_FETCH_LIMIT = 1500;
+const DEFAULT_MANIFEST_FETCH_LIMIT = 0;
 
 /** Server-side chart aggregates (full outbound cohort, not the chart row sample). */
 function buildChartExtrasFromState(data) {
@@ -60,6 +63,8 @@ function applyCampaignPausedUI(paused) {
                 'Campaign is paused — outbound dialing is off. Re-analyze and the lead list still work; no new calls will be placed until you Start during calling hours (9:30 AM – 8:30 PM IST).';
         }
     }
+}
+
     /* When !paused, do nothing — applyCampaignHoursUI re-manages the banner/button on the next poll. */
 
 const LEAD_SESSION_KEY_PREFIX = 'vernika_leads_snap_v2_';
@@ -262,7 +267,7 @@ async function refreshCampaignManifest(opts) {
         const raw = typeof window.__VERN_MANIFEST_FETCH_LIMIT !== 'undefined' && window.__VERN_MANIFEST_FETCH_LIMIT != null
             ? Number(window.__VERN_MANIFEST_FETCH_LIMIT)
             : DEFAULT_MANIFEST_FETCH_LIMIT;
-        const ml = Number.isFinite(raw) ? Math.min(20000, Math.max(50, Math.floor(raw))) : DEFAULT_MANIFEST_FETCH_LIMIT;
+        const ml = Number.isFinite(raw) ? (raw <= 0 ? 0 : Math.min(20000, Math.max(50, Math.floor(raw)))) : DEFAULT_MANIFEST_FETCH_LIMIT;
 
         const res = await fetch(apiUrl(`/api/campaign/manifest?role=${apiRoleQ()}&limit=${ml}`), {
             headers: { 'Authorization': `Bearer ${token()}` },
@@ -398,6 +403,7 @@ async function syncState() {
         const nTotal = Number.isFinite(totalInDb) && totalInDb >= 0
             ? Math.floor(totalInDb)
             : chartSample.length;
+        _serverTotalLeads = nTotal;
         const pendingN = Number.isFinite(Number(data.pending)) ? Math.floor(Number(data.pending)) : null;
 
         const called = chartSample.filter(isCalled);
@@ -1131,7 +1137,7 @@ function syncDashboardMetricsAndCharts(rows, fromDate, toDate, search) {
         });
     }
 
-    const totalCount = filteredAllLeads.length;
+    const totalCount = (_serverTotalLeads > 0) ? _serverTotalLeads : filteredAllLeads.length;
     const calledCount = rows.length;
     const interestedCount = rows.filter(l => effectiveDispo(l) === 'Interested').length;
     const notInterestedCount = rows.filter(l => effectiveDispo(l) === 'Not Interested').length;

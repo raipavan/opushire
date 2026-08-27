@@ -118,10 +118,7 @@ function getVoiceTestRole() {
     }
     // Fallback logic
     const path = window.location.pathname;
-    if (path.includes('sellers')) return 'sellers';
-    if (path.includes('buyers')) return 'buyers';
-    if (path.includes('rfqs')) return 'rfqs';
-    return 'sellers';
+    return 'data_edge';
 }
 
 async function startLiveTest() {

@@ -111,7 +111,12 @@ class Settings:
     campaign_quiet_end: str = (os.getenv("CAMPAIGN_QUIET_END", "09:30").strip() or "09:30")
 
     # Gemini Live API (native speech-to-speech for sub-800ms latency on phone calls)
-    gemini_live_model: str = os.getenv("GEMINI_LIVE_MODEL", "models/gemini-3.1-flash-live-preview").strip()
+    # Valid Google AI Studio Multimodal Live model: models/gemini-2.0-flash-exp
+    gemini_live_model: str = (
+        "models/gemini-2.0-flash-exp"
+        if ("3.1" in os.getenv("GEMINI_LIVE_MODEL", "") or "3-1" in os.getenv("GEMINI_LIVE_MODEL", ""))
+        else os.getenv("GEMINI_LIVE_MODEL", "models/gemini-2.0-flash-exp").strip()
+    )
     gemini_live_voice: str = os.getenv("GEMINI_LIVE_VOICE", "Leda").strip()
     gemini_live_language_code: str = os.getenv("GEMINI_LIVE_LANGUAGE_CODE", "en-IN").strip()
     # When True: skip disk/primed PCM opener — Gemini Live speaks the greeting (same engine as the call).
@@ -119,10 +124,10 @@ class Settings:
     gemini_live_first_opening: bool = _b("GEMINI_LIVE_FIRST_OPENING", False)
     # Turn-taking / barge-in: HIGH sensitivity Activity Detection + optional tighter profile (default on).
     gemini_live_aggressive_activity_detection: bool = _b("GEMINI_LIVE_AGGRESSIVE_ACTIVITY_DETECTION", True)
-    gemini_live_vad_prefix_padding_ms: int = int(os.getenv("GEMINI_LIVE_VAD_PREFIX_PADDING_MS", "40"))
-    gemini_live_vad_silence_duration_ms: int = int(os.getenv("GEMINI_LIVE_VAD_SILENCE_DURATION_MS", "80"))
-    gemini_live_vad_prefix_padding_ms_ultra: int = int(os.getenv("GEMINI_LIVE_VAD_PREFIX_PADDING_ULTRA_MS", "32"))
-    gemini_live_vad_silence_duration_ms_ultra: int = int(os.getenv("GEMINI_LIVE_VAD_SILENCE_DURATION_ULTRA_MS", "64"))
+    gemini_live_vad_prefix_padding_ms: int = int(os.getenv("GEMINI_LIVE_VAD_PREFIX_PADDING_MS", "150"))
+    gemini_live_vad_silence_duration_ms: int = int(os.getenv("GEMINI_LIVE_VAD_SILENCE_DURATION_MS", "300"))
+    gemini_live_vad_prefix_padding_ms_ultra: int = int(os.getenv("GEMINI_LIVE_VAD_PREFIX_PADDING_ULTRA_MS", "100"))
+    gemini_live_vad_silence_duration_ms_ultra: int = int(os.getenv("GEMINI_LIVE_VAD_SILENCE_DURATION_ULTRA_MS", "200"))
     # Appended system text nudging concise turns + yield-on-overlap (phone calls).
     gemini_live_append_turn_instructions: bool = _b("GEMINI_LIVE_APPEND_TURN_INSTRUCTIONS", True)
     # When no scripted PCM opening: brief gate before forwarding callee mic → Gemini (avoids chopping first model syllable).
@@ -258,9 +263,9 @@ def validate_critical_config() -> list[str]:
     problems: list[str] = []
     if not settings.gemini_api_key:
         problems.append("GEMINI_API_KEY / GOOGLE_API_KEY is not set")
-    elif not settings.gemini_api_key.startswith("AIza"):
+    elif not settings.gemini_api_key.startswith("AIza") and not settings.gemini_api_key.startswith("AQ."):
         problems.append(
-            f"GEMINI_API_KEY starts with '{settings.gemini_api_key[:6]}…' — expected 'AIza…' format. "
+            f"GEMINI_API_KEY starts with '{settings.gemini_api_key[:6]}…' — expected 'AIza…' or 'AQ.' format. "
             "Ensure this is a valid Google AI Studio API key."
         )
     vb = (
@@ -287,12 +292,20 @@ def validate_critical_config() -> list[str]:
             "http(s) origin with port (e.g. http://YOUR_IP:8001) while keeping callbacks on the tunnel "
             "if needed, or switch fully to a stable domain."
         )
+    # Check for Hostinger proxy which blocks WebSockets
+    if (pub and "hstgr.cloud" in pub.lower()) or (ts and "hstgr.cloud" in ts.lower()):
+        if not ts or "hstgr.cloud" in ts.lower():
+            problems.append(
+                "Hostinger shared domain (.hstgr.cloud) detected for Vobiz media streaming! "
+                "Hostinger's proxy blocks WebSocket upgrade requests (101 Switching Protocols), causing PITCH SILENCE on calls. "
+                "Set VOBIZ_PUBLIC_BASE_URL=http://31.97.186.20:8001 and VOBIZ_STREAM_PUBLIC_BASE_URL=http://31.97.186.20:8001 to bypass the proxy."
+            )
     # Warn about empty stream URL (non-fatal but important)
-    if vb and pub and not ts:
+    elif vb and pub and not ts:
         problems.append(
             "VOBIZ_STREAM_PUBLIC_BASE_URL is empty — media WebSocket will route through VOBIZ_PUBLIC_BASE_URL. "
             "If your domain/hosting does NOT support WebSocket upgrades, calls will connect but produce SILENCE. "
-            "Set VOBIZ_STREAM_PUBLIC_BASE_URL=http://YOUR_VPS_IP:8001 for direct WS media."
+            "Set VOBIZ_STREAM_PUBLIC_BASE_URL=http://31.97.186.20:8001 for direct WS media."
         )
     # Silence hangup too short
     silence_sec = float(os.getenv("CALL_SILENCE_HANGUP_SEC", "30"))

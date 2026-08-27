@@ -78,21 +78,8 @@ security = HTTPBearer(auto_error=False)
 # Simple user store — move to database in production
 _VALID_USERS = {
     "dataedge@pitchxai.com": {
-        "password_hash": b"$2b$12$iIkqGdA65scP5wCkVZzMgOdS2EeBLCBgbwa83vWmo5aadVg8NoKSq",
-        # Data Edge career counselor (Priya) — separate from Procucev sellers (Devika/GMT).
+        "password_hash": b"$2b$12$aCjuSY0XjABSS4DP.pFC7.r5nPUqNmColm5VtyheOyb21QbS8P5Ia",
         "role": "data_edge",
-    },
-    "sellers@procucev.com": {
-        "password_hash": b"$2b$12$o2iwP0QtQViVOPIMkPmE5.RtB4cJke7tH3XtM8xb8cewIKnPjMZ.q",
-        "role": "sellers",
-    },
-    "buyers@procucev.com": {
-        "password_hash": b"$2b$12$PFPpx4Ce9t6emE9cdQK/4.hJmv5ZVM98RfypJ5X5/2ya3hYdLExLO",
-        "role": "buyers",
-    },
-    "rfqs@procucev.com": {
-        "password_hash": b"$2b$12$yXSPFYsWoqPO3Y9.MoXW9Ox/lXApdAnPPZJzhYNx.TKoG6Mwwb67y",
-        "role": "rfqs",
     },
     "admin@procucev.com": {
         "password_hash": b"$2b$12$oWaM3kYTRT1ufyAFdEzJueCADOkg8zJKgqyKqXXqXsIasOEA9LH5u",
@@ -102,26 +89,10 @@ _VALID_USERS = {
         "password_hash": b"$2b$12$N6kT7BiCxvuYr12XxcMM0OoL2EZQse/g5.DzMlE3U0IiyJd5ZH7XC",
         "role": "factory",
     },
-    "realestate@pitchxai.com": {
-        "password_hash": b"$2b$12$fqwG.zYGVoZ/Ab24UIU9ZeoIBop5jsyZKwd3PuZlulXOKtgz52Scq",
-        "role": "real_estate",
-    },
-    "vernikaai@procucev.com": {
-        "password_hash": b"$2b$12$1hG62JWGVTuH5lw/hr02zObT6SL5yiBZMA0Td0wP.dE4nsn/yAsiq",
-        "role": "vernikaai",
-    },
-    "data-edge@gmail.com": {
-        "password_hash": b"$2b$12$lXD4lKN8cwUCtEoXvgw9dOETepk65XjbJSUfS.KEqpNrOB6VpG/6u",
-        "role": "sellers",
-    },
 }
 
 # Procucev Gmail that should see Sellers campaign data (not Data Edge counselor).
-_DASHBOARD_SELLERS_EMAILS = frozenset(
-    {
-        "sellers@procucev.com",
-    }
-)
+_DASHBOARD_SELLERS_EMAILS = frozenset()
 
 # Always Data Edge counselor dashboard — never Buyers/Sellers/RFQ toggle or datasets.
 _DATA_EDGE_LOGIN_EMAILS = frozenset(
@@ -130,7 +101,7 @@ _DATA_EDGE_LOGIN_EMAILS = frozenset(
     }
 )
 
-_CONSOLE_LOCKED_ROLES = frozenset({"data_edge", "vernikaai", "admin"})
+_CONSOLE_LOCKED_ROLES = frozenset({"data_edge", "admin"})
 
 
 def dashboard_role_for_token(email: str | None, jwt_role: str | None) -> str:
@@ -143,8 +114,6 @@ def dashboard_role_for_token(email: str | None, jwt_role: str | None) -> str:
         pass # return "data_edge"
 
     role = normalize_console_role(jwt_role or "data_edge")
-    if role == "data_edge" and em in _DASHBOARD_SELLERS_EMAILS:
-        return "sellers"
     return role
 
 
@@ -164,7 +133,7 @@ def console_session_meta(email: str | None, jwt_role: str | None) -> dict[str, o
 
 
 # Console UI can switch among these datasets without re-login (authenticated only).
-_CONSOLE_SWITCHABLE_ROLES = frozenset({"buyers", "sellers", "rfqs"})
+_CONSOLE_SWITCHABLE_ROLES = frozenset()
 
 
 def jwt_payload_from_request(request: Request) -> dict | None:
@@ -184,7 +153,7 @@ def jwt_payload_from_request(request: Request) -> dict | None:
 
 
 def console_role_from_request(request: Request, *, default: str = "data_edge") -> str:
-    """Resolve campaign/console role: JWT login role, or ``?role=`` when switching Buyers/Sellers/RFQs."""
+    """Resolve campaign/console role: always returns data_edge."""
     from core.state import normalize_console_role
 
     payload = jwt_payload_from_request(request)
@@ -195,17 +164,8 @@ def console_role_from_request(request: Request, *, default: str = "data_edge") -
             payload.get("role"),
         )
 
-    # Data Edge counselor account — never switch to Procucev buyers/sellers/rfqs via ?role=.
-    # if jwt_role == "data_edge":
-        # return "data_edge"
-
-    query_role = normalize_console_role(request.query_params.get("role") or "")
-    if payload and query_role in _CONSOLE_SWITCHABLE_ROLES:
-        return query_role
     if jwt_role:
         return jwt_role
-    if query_role:
-        return query_role
     header_role = normalize_console_role(request.headers.get("X-User-Role") or "")
     if header_role:
         return header_role
