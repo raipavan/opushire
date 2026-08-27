@@ -250,8 +250,6 @@ async def handle_vobiz_ws_live(
     recording_dir = settings.call_recording_dir
     api_key = settings.gemini_api_key
     model = settings.gemini_live_model
-    if not model or "3.1" in model or "3-1" in model:
-        model = "models/gemini-2.0-flash-exp"
     language_code = settings.gemini_live_language_code
 
     # ── Latency opt: start Gemini WS connect EARLY ──────────────────────

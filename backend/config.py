@@ -111,12 +111,7 @@ class Settings:
     campaign_quiet_end: str = (os.getenv("CAMPAIGN_QUIET_END", "09:30").strip() or "09:30")
 
     # Gemini Live API (native speech-to-speech for sub-800ms latency on phone calls)
-    # Valid Google AI Studio Multimodal Live model: models/gemini-2.0-flash-exp
-    gemini_live_model: str = (
-        "models/gemini-2.0-flash-exp"
-        if ("3.1" in os.getenv("GEMINI_LIVE_MODEL", "") or "3-1" in os.getenv("GEMINI_LIVE_MODEL", ""))
-        else os.getenv("GEMINI_LIVE_MODEL", "models/gemini-2.0-flash-exp").strip()
-    )
+    gemini_live_model: str = os.getenv("GEMINI_LIVE_MODEL", "models/gemini-2.0-flash-exp").strip()
     gemini_live_voice: str = os.getenv("GEMINI_LIVE_VOICE", "Leda").strip()
     gemini_live_language_code: str = os.getenv("GEMINI_LIVE_LANGUAGE_CODE", "en-IN").strip()
     # When True: skip disk/primed PCM opener — Gemini Live speaks the greeting (same engine as the call).
